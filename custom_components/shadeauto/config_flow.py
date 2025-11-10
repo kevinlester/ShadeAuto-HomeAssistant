@@ -8,7 +8,7 @@ from homeassistant.core import callback
 from homeassistant.data_entry_flow import FlowResult
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
-from .const import DOMAIN, CONF_HOST, DEFAULT_POLL
+from .const import DOMAIN, CONF_HOST, DEFAULT_POLL, DEFAULT_BURST_INTERVAL, DEFAULT_BURST_CYCLES, DEFAULT_LOW_BATT
 from .api import ShadeAutoApi
 
 STEP_USER = vol.Schema({vol.Required(CONF_HOST): str})
@@ -27,7 +27,6 @@ class ShadeAutoConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             except Exception:
                 errors["base"] = "cannot_connect"
             else:
-                # Unique per host so multiple hubs are supported
                 await self.async_set_unique_id(f"shadeauto_{host}")
                 self._abort_if_unique_id_configured()
                 return self.async_create_entry(title=f"ShadeAuto ({host})", data={CONF_HOST: host})
@@ -47,6 +46,9 @@ class ShadeAutoOptionsFlow(config_entries.OptionsFlow):
     async def async_step_init(self, user_input: dict[str, Any] | None = None) -> FlowResult:
         schema = vol.Schema({
             vol.Optional("poll_seconds", default=self.entry.options.get("poll_seconds", DEFAULT_POLL)): vol.Coerce(int),
+            vol.Optional("burst_interval", default=self.entry.options.get("burst_interval", DEFAULT_BURST_INTERVAL)): vol.Coerce(float),
+            vol.Optional("burst_cycles", default=self.entry.options.get("burst_cycles", DEFAULT_BURST_CYCLES)): vol.Coerce(int),
+            vol.Optional("low_battery_threshold", default=self.entry.options.get("low_battery_threshold", DEFAULT_LOW_BATT)): vol.Coerce(int),
         })
         if user_input is not None:
             return self.async_create_entry(title="", data=user_input)

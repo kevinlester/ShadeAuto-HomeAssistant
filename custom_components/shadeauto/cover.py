@@ -19,11 +19,10 @@ from .coordinator import ShadeAutoCoordinator
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, add_entities: AddEntitiesCallback):
     data = hass.data[DOMAIN][entry.entry_id]
     coord: ShadeAutoCoordinator = data["coordinator"]
-
     entities: list[ShadeAutoCover] = []
     for uid, meta in coord.peripherals.items():
         name = meta.get("name", f"Shade {uid}")
-        entities.append(ShadeAutoCover(coord, uid, name))
+        entities.append(ShadeAutoCover(coord, entry, uid, name))
     add_entities(entities)
 
 
@@ -33,8 +32,9 @@ class ShadeAutoCover(CoordinatorEntity[ShadeAutoCoordinator], CoverEntity):
         CoverEntityFeature.OPEN | CoverEntityFeature.CLOSE | CoverEntityFeature.SET_POSITION
     )
 
-    def __init__(self, coordinator: ShadeAutoCoordinator, uid: str, name: str) -> None:
+    def __init__(self, coordinator: ShadeAutoCoordinator, entry: ConfigEntry, uid: str, name: str) -> None:
         super().__init__(coordinator)
+        self._entry = entry
         self._uid = uid
         self._attr_name = name
         self._attr_unique_id = f"shadeauto_{coordinator.api.host}_{uid}"
@@ -43,10 +43,11 @@ class ShadeAutoCover(CoordinatorEntity[ShadeAutoCoordinator], CoverEntity):
     def device_info(self) -> DeviceInfo:
         host = self.coordinator.api.host
         return DeviceInfo(
-            identifiers={(DOMAIN, f"hub_{host}")},
-            name=f"ShadeAuto Hub ({host})",
+            identifiers={(DOMAIN, f"shade_{host}_{self._uid}")},
+            via_device=(DOMAIN, f"hub_{host}"),
+            name=self.name,
             manufacturer="Norman (ShadeAuto)",
-            model="Local Hub",
+            model=str(self.coordinator.peripherals.get(self._uid, {}).get("module_detail") or "Shade"),
         )
 
     def _status_for_uid(self) -> dict[str, Any]:
@@ -72,12 +73,18 @@ class ShadeAutoCover(CoordinatorEntity[ShadeAutoCoordinator], CoverEntity):
     async def async_set_cover_position(self, **kwargs):
         pos = int(kwargs["position"])
         await self.coordinator.api.control(self._uid, bottom=pos)
-        await self.coordinator.async_request_refresh()
+        interval = float(self._entry.options.get("burst_interval", 2))
+        cycles = int(self._entry.options.get("burst_cycles", 5))
+        await self.coordinator.async_burst_refresh(interval, cycles)
 
     async def async_open_cover(self, **kwargs):
         await self.coordinator.api.control(self._uid, bottom=100)
-        await self.coordinator.async_request_refresh()
+        interval = float(self._entry.options.get("burst_interval", 2))
+        cycles = int(self._entry.options.get("burst_cycles", 5))
+        await self.coordinator.async_burst_refresh(interval, cycles)
 
     async def async_close_cover(self, **kwargs):
         await self.coordinator.api.control(self._uid, bottom=0)
-        await self.coordinator.async_request_refresh()
+        interval = float(self._entry.options.get("burst_interval", 2))
+        cycles = int(self._entry.options.get("burst_cycles", 5))
+        await self.coordinator.async_burst_refresh(interval, cycles)

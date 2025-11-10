@@ -1,15 +1,17 @@
 # ShadeAuto (local) — Home Assistant Custom Integration
 
 Control Norman **ShadeAuto** shades locally via the hub’s undocumented HTTP API.  
-✅ Multiple hubs • ✅ One device per shade • ✅ Covers (open/close/set position) • ✅ Battery **%** sensor per shade • ✅ Low-battery binary sensor • ✅ Burst polling after commands
 
+---
 > ⚠️ This uses **undocumented** local endpoints (`/NM/v1/*`). Firmware may change behavior. Isolate the hub and restrict access to TCP **10123**.
+---
 
 ## Features
-- **Auto-discover shades** from the hub.
+- **Auto-discover shades** from any detected ShadeAuto hub(s).
 - One **Device** per discovered Shade
-- One **Cover** entity per shade: open/close/**set position** (0–100).
-- One **Battery (%)** sensor per shade.
+  - One **Cover** entity per shade: open/close/**set position** (0–100).
+  - One **Battery (%)** sensor per shade.
+  - One **Low Battery (%)** flag per shade.
 - Works with **multiple hubs** (add each hub by IP).
 
 ## Options

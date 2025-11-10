@@ -20,10 +20,15 @@ Control Norman **ShadeAuto** shades locally via the hub’s undocumented HTTP AP
 ## Installation
 
 ### Via HACS (custom repository)
-1. HACS → *Integrations* → ⋯ → **Custom repositories** → add your GitHub repo URL, Category **Integration**.
-2. Find **ShadeAuto (local)** → **Install** → **Restart** Home Assistant.
-3. Settings → *Devices & Services* → **Add Integration** → **ShadeAuto (local)** → enter your **hub IP**.
-4. Repeat step 3 for additional hubs.
+Click this badge to automatically add this repository to your list of custom repositories: [![Open this repository in HACS](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=kevinlester&repository=ShadeAuto-HomeAssistant&category=integration)
+
+If that doesn't work or is disagreeable to you, you can add it via the following:
+HACS → *Integrations* → ⋯ → **Custom repositories** → add this GitHub repo URL, Category **Integration**.
+
+Then
+1. Find **ShadeAuto (local)** → **Install** → **Restart** Home Assistant.
+2. Settings → *Devices & Services* → **Add Integration** → **ShadeAuto (local)** → enter your **hub IP**.
+3. Repeat step 3 for additional hubs.
 
 ### Manual
 1. Copy `custom_components/shadeauto/` into your HA `config/custom_components/`.

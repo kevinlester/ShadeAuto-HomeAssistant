@@ -51,3 +51,42 @@ Control Norman **ShadeAuto** shades locally via the hub’s undocumented HTTP AP
 service: cover.set_cover_position
 target: { entity_id: cover.deck_shade }
 data: { position: 40 }
+
+
+**Automation: alert low battery**
+```yaml
+alias: Shade battery low
+trigger:
+  - platform: numeric_state
+    entity_id: sensor.deck_shade_battery
+    below: 20
+action:
+  - service: persistent_notification.create
+    data:
+      title: Shade battery low
+      message: "Deck shade battery at {{ states('sensor.deck_shade_battery') }}%"
+```
+
+## Troubleshooting
+- **No entities?** Ensure the hub is reachable; try curl:
+  ```bash
+  curl -s -X POST http://HUB_IP:10123/NM/v1/registration -H 'Content-Type: application/json' -d '{"Timestamp": 1700000000}'
+  ```
+- **Logs** (add to `configuration.yaml`):
+  ```yaml
+  logger:
+    logs:
+      custom_components.shadeauto: debug
+  ```
+
+## Security notes
+- The hub’s local API is unauthenticated. Restrict access to the hub (VLAN, firewall, allow-list HA only).
+
+## Limitations
+- No top/middle rail (TDBU) control in this build.
+- Battery is exposed as **%**; mapping from volts is a heuristic if hub returns volts.
+- API is not official; behavior may change with updates.
+
+## Credits & License
+- Community discoveries of the local endpoints inspired this integration.
+- MIT License. Add a `LICENSE` if you publish publicly.

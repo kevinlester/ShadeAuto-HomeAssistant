@@ -46,6 +46,10 @@ Then
 1. Copy `custom_components/shadeauto/` into your HA `config/custom_components/`.
 2. Restart HA, then add the integration.
 
+## Configuration
+- **Host**: hub IP (e.g., `192.168.1.50`).
+- **Options** → *Poll seconds*: default **30s**. (Faster polling increases traffic.)
+
 ## Example use
 
 ### Open a shade to 40%

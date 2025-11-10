@@ -26,7 +26,7 @@ If that doesn't work or is disagreeable to you, you can add it via the following
 HACS → *Integrations* → ⋯ → **Custom repositories** → add this GitHub repo URL, Category **Integration**.
 
 Then
-1. Find **ShadeAuto (local)** → **Install** → **Restart** Home Assistant.
+1. Find **ShadeAuto (local)** → **Download** → **Restart** Home Assistant.
 2. Settings → *Devices & Services* → **Add Integration** → **ShadeAuto (local)** → enter your **hub IP**.
 3. Repeat step 3 for additional hubs.
 

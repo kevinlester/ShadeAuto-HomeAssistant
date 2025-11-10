@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from homeassistant.components.sensor import SensorEntity
+from homeassistant.components.binary_sensor import BinarySensorEntity, BinarySensorDeviceClass
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
@@ -9,46 +9,29 @@ from homeassistant.helpers.entity import DeviceInfo
 
 from .const import DOMAIN
 from .coordinator import ShadeAutoCoordinator
-
-
-def _raw_to_percent(raw):
-    if raw is None:
-        return None
-    try:
-        val = float(raw)
-    except (TypeError, ValueError):
-        return None
-    if 0 <= val <= 100:
-        return int(round(val))
-    if 2.5 <= val <= 5.5:
-        lo, hi = 3.30, 4.20
-        pct = (max(min(val, hi), lo) - lo) / (hi - lo) * 100
-        return int(round(pct))
-    return None
+from .sensor import _raw_to_percent
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, add_entities: AddEntitiesCallback):
     data = hass.data[DOMAIN][entry.entry_id]
     coord: ShadeAutoCoordinator = data["coordinator"]
 
-    ents: list[ShadeAutoBattery] = []
+    ents: list[ShadeAutoBatteryLow] = []
     for uid, meta in coord.peripherals.items():
-        ents.append(ShadeAutoBattery(coord, entry, uid, f"{meta.get('name','Shade')} Battery"))
+        ents.append(ShadeAutoBatteryLow(coord, entry, uid, f"{meta.get('name','Shade')} Battery Low"))
     add_entities(ents)
 
 
-class ShadeAutoBattery(CoordinatorEntity[ShadeAutoCoordinator], SensorEntity):
+class ShadeAutoBatteryLow(CoordinatorEntity[ShadeAutoCoordinator], BinarySensorEntity):
     _attr_should_poll = False
-    _attr_device_class = "battery"
-    _attr_state_class = "measurement"
-    _attr_native_unit_of_measurement = "%"
+    _attr_device_class = BinarySensorDeviceClass.BATTERY
 
     def __init__(self, coordinator: ShadeAutoCoordinator, entry: ConfigEntry, uid: str, name: str) -> None:
         super().__init__(coordinator)
         self._entry = entry
         self._uid = uid
         self._attr_name = name
-        self._attr_unique_id = f"shadeauto_{coordinator.api.host}_{uid}_battery"
+        self._attr_unique_id = f"shadeauto_{coordinator.api.host}_{uid}_battery_low"
 
     @property
     def available(self) -> bool:
@@ -66,7 +49,11 @@ class ShadeAutoBattery(CoordinatorEntity[ShadeAutoCoordinator], SensorEntity):
         )
 
     @property
-    def native_value(self):
+    def is_on(self) -> bool | None:
         st = self.coordinator.data.get("status", {}).get(self._uid, {})
         raw = st.get("BatteryVoltage")
-        return _raw_to_percent(raw)
+        pct = _raw_to_percent(raw)
+        if pct is None:
+            return None
+        threshold = int(self._entry.options.get("low_battery_threshold", 20))
+        return pct <= threshold

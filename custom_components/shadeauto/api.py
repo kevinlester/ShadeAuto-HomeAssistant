@@ -14,7 +14,6 @@ def _now_ts() -> int:
 
 
 def _find_dicts_with_key(obj: Any, key: str):
-    """Yield dicts from arbitrarily nested JSON that contain a given key."""
     if isinstance(obj, dict):
         if key in obj:
             yield obj
@@ -44,7 +43,6 @@ class ShadeAutoApi:
         _LOGGER.debug("POST %s %s", url, payload)
         async with self._session.post(url, json=payload, timeout=timeout) as resp:
             resp.raise_for_status()
-            # Hub sometimes replies without proper content-type
             return await resp.json(content_type=None)
 
     async def registration(self) -> Dict[str, Any]:
@@ -54,11 +52,7 @@ class ShadeAutoApi:
         return data
 
     async def get_all_peripheral(self) -> List[Dict[str, Any]]:
-        payload = {
-            "ThingName": self.thing_name,
-            "TaskID": 1,
-            "Timestamp": _now_ts(),
-        }
+        payload = {"ThingName": self.thing_name, "TaskID": 1, "Timestamp": _now_ts()}
         data = await self._post("/NM/v1/GetAllPeripheral", payload)
         return list(_find_dicts_with_key(data, "PeripheralUID"))
 
@@ -67,7 +61,6 @@ class ShadeAutoApi:
         return list(_find_dicts_with_key(data, "PeripheralUID"))
 
     async def control(self, uid: int | str, *, bottom: int | None = None) -> Dict[str, Any]:
-        """Move a shade. Positions are 0..100 (BottomRailPosition only)."""
         payload: Dict[str, Any] = {
             "PeripheralUID": int(uid) if str(uid).isdigit() else uid,
             "TaskID": 1,

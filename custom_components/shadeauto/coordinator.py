@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import asyncio
 from datetime import timedelta
 from typing import Any, Dict
 
@@ -30,7 +31,6 @@ class ShadeAutoCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
         return self._peripherals
 
     async def async_config_entry_first_refresh(self) -> None:
-        # Initial handshake + discovery
         await self.api.registration()
         per_list = await self.api.get_all_peripheral()
         self._peripherals = {
@@ -56,13 +56,13 @@ class ShadeAutoCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
             if not uid:
                 continue
             cur = by_uid.setdefault(uid, {})
-            # Copy common fields we care about
             for k in ("BottomRailPosition", "BatteryVoltage", "Name"):
                 if k in item:
                     cur[k] = item[k]
 
-        return {
-            "thing_name": self.api.thing_name,
-            "peripherals": self._peripherals,
-            "status": by_uid,
-        }
+        return {"thing_name": self.api.thing_name, "peripherals": self._peripherals, "status": by_uid}
+
+    async def async_burst_refresh(self, interval: float, cycles: int) -> None:
+        for _ in range(max(0, cycles)):
+            await self.async_request_refresh()
+            await asyncio.sleep(max(0.1, interval))

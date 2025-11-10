@@ -39,6 +39,7 @@ Then
 - **Options** → *Poll seconds*: default **30s**. (Faster polling increases traffic.)
 
 ## Entities
+This integration will auto-discover the shades attached to each configured hub, and will create 2 entities for each shade:
 - `cover.<shade_name>`  
   - Supports **open**, **close**, **set position**.
   - Attributes:  

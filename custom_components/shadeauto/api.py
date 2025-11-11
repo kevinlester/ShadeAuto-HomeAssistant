@@ -62,8 +62,26 @@ class ShadeAutoApi:
         return list(_find_dicts_with_key(data, "PeripheralUID"))
 
     async def status(self) -> List[Dict[str, Any]]:
-        data = await self._post("/NM/v1/status", {"Timestamp": _now_ts()})
-        return list(_find_dicts_with_key(data, "PeripheralUID"))
+        payload = {"Timestamp": _now_ts()}
+        data = await self._post("/NM/v1/status", payload)
+        items = list(_find_dicts_with_key(data, "PeripheralUID"))
+        # Debug summary: UID:Bottom [ / Middle if present ]
+        try:
+            parts = []
+            for d in items:
+                uid = d.get("PeripheralUID")
+                bot = d.get("BottomRailPosition")
+                mid = d.get("MiddleRailPosition")
+                if mid is not None:
+                    parts.append(f"{uid}:{bot}/{mid}")
+                else:
+                    parts.append(f"{uid}:{bot}")
+            if parts:
+                _LOGGER.debug("STATUS positions: %s", ", ".join(parts))
+        except Exception:
+            # don't let logging break status
+            pass
+        return items
 
     def _task_id(self) -> int:
         # millisecond-ish unique ID in signed 31-bit range
@@ -88,7 +106,9 @@ class ShadeAutoApi:
     
         # keep current per-hub send spacing
         async with self._cmd_lock:
-            from .const import SEND_SPACING_SEC
+            from .const import DEFAULT_SEND_SPACING
+            spacing = getattr(self, "send_spacing_sec", DEFAULT_SEND_SPACING)
+            gap = spacing - (time.time() - self._last_send)
             gap = SEND_SPACING_SEC - (time.time() - self._last_send)
             if gap > 0:
                 await asyncio.sleep(gap)

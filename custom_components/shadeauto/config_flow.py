@@ -8,7 +8,11 @@ from homeassistant.core import callback
 from homeassistant.data_entry_flow import FlowResult
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
-from .const import DOMAIN, CONF_HOST, DEFAULT_POLL, DEFAULT_BURST_INTERVAL, DEFAULT_BURST_CYCLES, DEFAULT_LOW_BATT
+from .const import (
+    DOMAIN, CONF_HOST,
+    DEFAULT_POLL, DEFAULT_BURST_INTERVAL, DEFAULT_BURST_CYCLES, DEFAULT_LOW_BATT,
+    DEFAULT_SEND_SPACING, DEFAULT_VERIFY_ENABLED, DEFAULT_VERIFY_DELAY
+)
 from .api import ShadeAutoApi
 
 STEP_USER = vol.Schema({vol.Required(CONF_HOST): str})
@@ -49,6 +53,9 @@ class ShadeAutoOptionsFlow(config_entries.OptionsFlow):
             vol.Optional("burst_interval", default=self.entry.options.get("burst_interval", 2)): vol.Coerce(float),
             vol.Optional("burst_cycles", default=self.entry.options.get("burst_cycles", 5)): vol.Coerce(int),
             vol.Optional("low_battery_threshold", default=self.entry.options.get("low_battery_threshold", 20)): vol.Coerce(int),
+            vol.Optional("send_spacing_sec", default=self.entry.options.get("send_spacing_sec", DEFAULT_SEND_SPACING)): vol.Coerce(float),
+            vol.Optional("verify_enabled", default=self.entry.options.get("verify_enabled", DEFAULT_VERIFY_ENABLED)): bool,
+            vol.Optional("verify_delay_sec", default=self.entry.options.get("verify_delay_sec", DEFAULT_VERIFY_DELAY)): vol.Coerce(float),
         })
         if user_input is not None:
             return self.async_create_entry(title="", data=user_input)

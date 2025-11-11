@@ -72,19 +72,36 @@ class ShadeAutoCover(CoordinatorEntity[ShadeAutoCoordinator], CoverEntity):
 
     async def async_set_cover_position(self, **kwargs):
         pos = int(kwargs["position"])
+        before = None
+        st = self.coordinator.data.get("status", {}).get(self._uid, {})
+        if st and "BottomRailPosition" in st:
+            try:
+                before = int(st["BottomRailPosition"])
+            except (TypeError, ValueError):
+                before = None
         await self.coordinator.api.control(self._uid, bottom=pos)
+        # option-driven verify/retry
+        if bool(self._entry.options.get("verify_enabled", True)):
+            delay = float(self._entry.options.get("verify_delay_sec", 20.0))
+            await self.coordinator.async_verify_and_retry(self._uid, pos, prev=before, delay=delay)
         interval = float(self._entry.options.get("burst_interval", 2))
         cycles = int(self._entry.options.get("burst_cycles", 5))
         await self.coordinator.async_burst_refresh(interval, cycles)
 
     async def async_open_cover(self, **kwargs):
         await self.coordinator.api.control(self._uid, bottom=100)
+        if bool(self._entry.options.get("verify_enabled", True)):
+            delay = float(self._entry.options.get("verify_delay_sec", 20.0))
+            await self.coordinator.async_verify_and_retry(self._uid, 100, prev=None, delay=delay)        
         interval = float(self._entry.options.get("burst_interval", 2))
         cycles = int(self._entry.options.get("burst_cycles", 5))
         await self.coordinator.async_burst_refresh(interval, cycles)
 
     async def async_close_cover(self, **kwargs):
         await self.coordinator.api.control(self._uid, bottom=0)
+        if bool(self._entry.options.get("verify_enabled", True)):
+            delay = float(self._entry.options.get("verify_delay_sec", 20.0))
+            await self.coordinator.async_verify_and_retry(self._uid, 0, prev=None, delay=delay)        
         interval = float(self._entry.options.get("burst_interval", 2))
         cycles = int(self._entry.options.get("burst_cycles", 5))
         await self.coordinator.async_burst_refresh(interval, cycles)

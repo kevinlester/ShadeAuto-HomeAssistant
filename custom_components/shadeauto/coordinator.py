@@ -70,3 +70,22 @@ class ShadeAutoCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
         for _ in range(max(0, cycles)):
             await self.async_request_refresh()
             await asyncio.sleep(delay)
+
+    async def async_verify_and_retry(
+        self, uid: str, target: int, *, prev: int | None = None,
+        moved_threshold: int = 1, delay: float = 0.50
+    ) -> None:
+        """Retry once only if the shade hasn't started moving after the command."""
+        await asyncio.sleep(max(0.1, delay))
+        await self.async_request_refresh()
+        st = self.data.get("status", {}).get(str(uid), {})
+        pos_raw = st.get("BottomRailPosition")
+        try:
+            pos = int(pos_raw) if pos_raw is not None else None
+        except (TypeError, ValueError):
+            pos = None
+        # If we have a 'before' reading and the position hasn't changed by >= moved_threshold, resend once.
+        if prev is not None and pos is not None and abs(pos - int(prev)) < moved_threshold:
+            _LOGGER.debug("verify_and_retry: UID %s did not move (prev=%s, now=%s); retrying once", uid, prev, pos)
+            await self.api.control(uid, bottom=int(target))
+            await self.async_request_refresh()

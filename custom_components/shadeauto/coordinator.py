@@ -63,6 +63,10 @@ class ShadeAutoCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
         return {"thing_name": self.api.thing_name, "peripherals": self._peripherals, "status": by_uid}
 
     async def async_burst_refresh(self, interval: float, cycles: int) -> None:
+        """Poll /status a bit after commands so we don't interleave between controls."""
+        delay = max(0.1, float(interval))
+        # Defer the very first poll to avoid landing between two control posts
+        await asyncio.sleep(delay)
         for _ in range(max(0, cycles)):
             await self.async_request_refresh()
-            await asyncio.sleep(max(0.1, interval))
+            await asyncio.sleep(delay)

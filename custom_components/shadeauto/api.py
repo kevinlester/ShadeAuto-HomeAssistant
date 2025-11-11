@@ -36,6 +36,7 @@ class ShadeAutoApi:
         # Reliability helpers
         self._cmd_lock = asyncio.Lock()
         self._last_send = 0.0
+        self._last_ts = 0  # ensure Timestamp is monotonic per hub
 
     @property
     def host(self) -> str:
@@ -68,24 +69,30 @@ class ShadeAutoApi:
         # millisecond-ish unique ID in signed 31-bit range
         return int(time.time() * 1000) & 0x7FFFFFFF
 
-    async def control(self, uid: int | str, *, bottom: int | None = None) -> Dict[str, Any]:
+    async def control(self, uid: int | str, *, bottom: int | None = None) -> dict:
         """Move a shade. Positions are 0..100 (BottomRailPosition only)."""
-        payload: Dict[str, Any] = {
+        # Monotonic seconds: avoid identical Timestamps for back-to-back commands
+        now = _now_ts()
+        ts = now if now > self._last_ts else self._last_ts + 1
+        self._last_ts = ts
+    
+        payload: dict = {
             "PeripheralUID": int(uid) if str(uid).isdigit() else uid,
             "TaskID": self._task_id(),
-            "Timestamp": _now_ts(),
+            "Timestamp": ts,
         }
         if self.thing_name:
             payload["ThingName"] = self.thing_name
         if bottom is not None:
             payload["BottomRailPosition"] = int(bottom)
-
-        # serialize and space commands per hub to avoid drops
+    
+        # keep current per-hub send spacing
         async with self._cmd_lock:
-            from .const import SEND_SPACING_SEC  # avoid import cycle
+            from .const import SEND_SPACING_SEC
             gap = SEND_SPACING_SEC - (time.time() - self._last_send)
             if gap > 0:
                 await asyncio.sleep(gap)
             resp = await self._post("/NM/v1/control", payload)
             self._last_send = time.time()
             return resp
+

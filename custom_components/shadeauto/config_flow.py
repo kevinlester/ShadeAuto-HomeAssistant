@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from typing import Any
-
+from homeassistant.helpers.selector import selector
 import voluptuous as vol
 from homeassistant import config_entries
 from homeassistant.core import callback
@@ -49,13 +49,26 @@ class ShadeAutoOptionsFlow(config_entries.OptionsFlow):
 
     async def async_step_init(self, user_input: dict[str, Any] | None = None) -> FlowResult:
         schema = vol.Schema({
-            vol.Optional("poll_seconds", default=self.entry.options.get("poll_seconds", DEFAULT_POLL)): vol.Coerce(int),
-            vol.Optional("burst_interval", default=self.entry.options.get("burst_interval", 2)): vol.Coerce(float),
-            vol.Optional("burst_cycles", default=self.entry.options.get("burst_cycles", 5)): vol.Coerce(int),
-            vol.Optional("low_battery_threshold", default=self.entry.options.get("low_battery_threshold", 20)): vol.Coerce(int),
-            vol.Optional("send_spacing_sec", default=self.entry.options.get("send_spacing_sec", DEFAULT_SEND_SPACING)): vol.Coerce(float),
-            vol.Optional("verify_enabled", default=self.entry.options.get("verify_enabled", DEFAULT_VERIFY_ENABLED)): bool,
-            vol.Optional("verify_delay_sec", default=self.entry.options.get("verify_delay_sec", DEFAULT_VERIFY_DELAY)): vol.Coerce(float),
+            vol.Optional("poll_seconds", default=self.entry.options.get("poll_seconds", DEFAULT_POLL)):
+                selector({"number": {"min": 5, "max": 120, "step": 1, "unit_of_measurement": "s", "mode": "box"}}),
+
+            vol.Optional("burst_interval", default=self.entry.options.get("burst_interval", DEFAULT_BURST_INTERVAL)):
+                selector({"number": {"min": 0.5, "max": 10, "step": 0.1, "unit_of_measurement": "s"}}),
+
+            vol.Optional("burst_cycles", default=self.entry.options.get("burst_cycles", DEFAULT_BURST_CYCLES)):
+                selector({"number": {"min": 0, "max": 10, "step": 1}}),
+
+            vol.Optional("low_battery_threshold", default=self.entry.options.get("low_battery_threshold", DEFAULT_LOW_BATT)):
+                selector({"number": {"min": 5, "max": 50, "step": 1, "unit_of_measurement": "%"}}),
+
+            vol.Optional("send_spacing_sec", default=self.entry.options.get("send_spacing_sec", DEFAULT_SEND_SPACING)):
+                selector({"number": {"min": 0.15, "max": 1.0, "step": 0.05, "unit_of_measurement": "s"}}),
+
+            vol.Optional("verify_enabled", default=self.entry.options.get("verify_enabled", DEFAULT_VERIFY_ENABLED)):
+                selector({"boolean": {}}),
+
+            vol.Optional("verify_delay_sec", default=self.entry.options.get("verify_delay_sec", DEFAULT_VERIFY_DELAY)):
+                selector({"number": {"min": 1, "max": 60, "step": 1, "unit_of_measurement": "s"}}),
         })
         if user_input is not None:
             return self.async_create_entry(title="", data=user_input)

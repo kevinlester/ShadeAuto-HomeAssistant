@@ -109,7 +109,6 @@ class ShadeAutoApi:
             from .const import DEFAULT_SEND_SPACING
             spacing = getattr(self, "send_spacing_sec", DEFAULT_SEND_SPACING)
             gap = spacing - (time.time() - self._last_send)
-            gap = SEND_SPACING_SEC - (time.time() - self._last_send)
             if gap > 0:
                 await asyncio.sleep(gap)
             resp = await self._post("/NM/v1/control", payload)

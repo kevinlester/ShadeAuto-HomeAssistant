@@ -46,9 +46,9 @@ class ShadeAutoOptionsFlow(config_entries.OptionsFlow):
     async def async_step_init(self, user_input: dict[str, Any] | None = None) -> FlowResult:
         schema = vol.Schema({
             vol.Optional("poll_seconds", default=self.entry.options.get("poll_seconds", DEFAULT_POLL)): vol.Coerce(int),
-            vol.Optional("burst_interval", default=self.entry.options.get("burst_interval", DEFAULT_BURST_INTERVAL)): vol.Coerce(float),
-            vol.Optional("burst_cycles", default=self.entry.options.get("burst_cycles", DEFAULT_BURST_CYCLES)): vol.Coerce(int),
-            vol.Optional("low_battery_threshold", default=self.entry.options.get("low_battery_threshold", DEFAULT_LOW_BATT)): vol.Coerce(int),
+            vol.Optional("burst_interval", default=self.entry.options.get("burst_interval", 2)): vol.Coerce(float),
+            vol.Optional("burst_cycles", default=self.entry.options.get("burst_cycles", 5)): vol.Coerce(int),
+            vol.Optional("low_battery_threshold", default=self.entry.options.get("low_battery_threshold", 20)): vol.Coerce(int),
         })
         if user_input is not None:
             return self.async_create_entry(title="", data=user_input)

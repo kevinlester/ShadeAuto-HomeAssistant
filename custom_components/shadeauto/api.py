@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import time
 import logging
+import asyncio
 from typing import Any, Dict, List, Optional
 
 from aiohttp import ClientSession, ClientTimeout
@@ -32,6 +33,9 @@ class ShadeAutoApi:
         self._base = f"http://{host}:10123"
         self._session = session
         self.thing_name: Optional[str] = None
+        # Reliability helpers
+        self._cmd_lock = asyncio.Lock()
+        self._last_send = 0.0
 
     @property
     def host(self) -> str:
@@ -60,12 +64,28 @@ class ShadeAutoApi:
         data = await self._post("/NM/v1/status", {"Timestamp": _now_ts()})
         return list(_find_dicts_with_key(data, "PeripheralUID"))
 
+    def _task_id(self) -> int:
+        # millisecond-ish unique ID in signed 31-bit range
+        return int(time.time() * 1000) & 0x7FFFFFFF
+
     async def control(self, uid: int | str, *, bottom: int | None = None) -> Dict[str, Any]:
+        """Move a shade. Positions are 0..100 (BottomRailPosition only)."""
         payload: Dict[str, Any] = {
             "PeripheralUID": int(uid) if str(uid).isdigit() else uid,
-            "TaskID": 1,
+            "TaskID": self._task_id(),
             "Timestamp": _now_ts(),
         }
+        if self.thing_name:
+            payload["ThingName"] = self.thing_name
         if bottom is not None:
             payload["BottomRailPosition"] = int(bottom)
-        return await self._post("/NM/v1/control", payload)
+
+        # serialize and space commands per hub to avoid drops
+        async with self._cmd_lock:
+            from .const import SEND_SPACING_SEC  # avoid import cycle
+            gap = SEND_SPACING_SEC - (time.time() - self._last_send)
+            if gap > 0:
+                await asyncio.sleep(gap)
+            resp = await self._post("/NM/v1/control", payload)
+            self._last_send = time.time()
+            return resp

@@ -11,4 +11,5 @@ DEFAULT_POLL = 30               # idle poll seconds
 DEFAULT_BURST_INTERVAL = 2      # seconds between burst polls after commands
 DEFAULT_BURST_CYCLES = 5        # number of burst polls
 DEFAULT_LOW_BATT = 20           # percent threshold for low-battery
+SEND_SPACING_SEC = 0.15         # spacing between /control posts to a hub
 PORT = 10123

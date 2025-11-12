@@ -209,15 +209,7 @@ class ShadeAutoCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
         if state is None:
             state = self._motion[uid_s] = ShadeMotionState()
 
-        # Core motion / fake position
-        state.in_motion = True
-        state.pending_target = target_i
-        state.last_control_ts = now
-        state.retry_attempted = False
-        self._last_global_control_ts = now
-
-        # UI motion timing based on distance to travel
-        # Use effective position first, then last_hub_pos, else assume 0 as baseline.
+        # Compute pre-command effective position for UI timing
         base_pos = self.get_effective_position(uid_s)
         if base_pos is None:
             base_pos = state.last_hub_pos if state.last_hub_pos is not None else 0
@@ -226,6 +218,14 @@ class ShadeAutoCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
         except (TypeError, ValueError):
             base_pos_i = 0
 
+        # Core motion / fake position
+        state.in_motion = True
+        state.pending_target = target_i
+        state.last_control_ts = now
+        state.retry_attempted = False
+        self._last_global_control_ts = now
+
+        # UI motion timing based on distance to travel
         distance = abs(target_i - base_pos_i)
         duration = distance * UI_SECONDS_PER_PERCENT if distance > 0 else 0.0
 

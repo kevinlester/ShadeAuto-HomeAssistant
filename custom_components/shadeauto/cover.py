@@ -75,27 +75,31 @@ class ShadeAutoCover(CoordinatorEntity[ShadeAutoCoordinator], CoverEntity):
         pos = self.current_cover_position
         return None if pos is None else pos == 0
 
-    @property
-    def is_opening(self) -> bool | None:
-        """Return True if the cover is currently opening."""
-        state = self.coordinator.get_motion_state(self._uid)
-        if not state or not state.in_motion:
-            return None
-        if state.pending_target is None or state.last_hub_pos is None:
-            return None
-        # Higher BottomRailPosition = more open
-        return state.pending_target > state.last_hub_pos
+    # Removed because ShadeAuto hubs lag so much, that we can't tell when a shade stops moving.  The status can
+    # lag by over 30 seconds, and it's weird to show the shade as "opening" for 30 seconds when it is actually
+    # stationary.  Hence, we either have to guess when the shade stops moving, or just not show the opening/closing   
+    # states. I chose the latter.
+    # @property
+    # def is_opening(self) -> bool | None:
+    #     """Return True if the cover is currently opening."""
+    #     state = self.coordinator.get_motion_state(self._uid)
+    #     if not state or not state.in_motion:
+    #         return None
+    #     if state.pending_target is None or state.last_hub_pos is None:
+    #         return None
+    #     # Higher BottomRailPosition = more open
+    #     return state.pending_target > state.last_hub_pos
 
-    @property
-    def is_closing(self) -> bool | None:
-        """Return True if the cover is currently closing."""
-        state = self.coordinator.get_motion_state(self._uid)
-        if not state or not state.in_motion:
-            return None
-        if state.pending_target is None or state.last_hub_pos is None:
-            return None
-        # Lower BottomRailPosition = more closed
-        return state.pending_target < state.last_hub_pos
+    # @property
+    # def is_closing(self) -> bool | None:
+    #     """Return True if the cover is currently closing."""
+    #     state = self.coordinator.get_motion_state(self._uid)
+    #     if not state or not state.in_motion:
+    #         return None
+    #     if state.pending_target is None or state.last_hub_pos is None:
+    #         return None
+    #     # Lower BottomRailPosition = more closed
+    #     return state.pending_target < state.last_hub_pos
 
     async def async_set_cover_position(self, **kwargs):
         pos = int(kwargs["position"])

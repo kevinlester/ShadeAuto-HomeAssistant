@@ -28,16 +28,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, add_entitie
 
 class ShadeAutoCover(CoordinatorEntity[ShadeAutoCoordinator], CoverEntity):
     _attr_should_poll = False
-    _attr_supported_features = (
-        CoverEntityFeature.OPEN | CoverEntityFeature.CLOSE | CoverEntityFeature.SET_POSITION
-    )
+    _attr_supported_features = CoverEntityFeature.OPEN | CoverEntityFeature.CLOSE | CoverEntityFeature.SET_POSITION
 
     def __init__(self, coordinator: ShadeAutoCoordinator, entry: ConfigEntry, uid: str, name: str) -> None:
         super().__init__(coordinator)
+        self._uid = str(uid)
         self._entry = entry
-        self._uid = uid
         self._attr_name = name
-        thing = coordinator.data.get("thing_name") or coordinator.api.host
+
+        thing = coordinator.data.get("thing_name") or coordinator.api.thing_name or "ShadeAutoHub"
         self._attr_unique_id = f"shadeauto_{thing}_{uid}"
 
     @property
@@ -76,6 +75,28 @@ class ShadeAutoCover(CoordinatorEntity[ShadeAutoCoordinator], CoverEntity):
         pos = self.current_cover_position
         return None if pos is None else pos == 0
 
+    @property
+    def is_opening(self) -> bool | None:
+        """Return True if the cover is currently opening."""
+        state = self.coordinator.get_motion_state(self._uid)
+        if not state or not state.in_motion:
+            return None
+        if state.pending_target is None or state.last_hub_pos is None:
+            return None
+        # Higher BottomRailPosition = more open
+        return state.pending_target > state.last_hub_pos
+
+    @property
+    def is_closing(self) -> bool | None:
+        """Return True if the cover is currently closing."""
+        state = self.coordinator.get_motion_state(self._uid)
+        if not state or not state.in_motion:
+            return None
+        if state.pending_target is None or state.last_hub_pos is None:
+            return None
+        # Lower BottomRailPosition = more closed
+        return state.pending_target < state.last_hub_pos
+
     async def async_set_cover_position(self, **kwargs):
         pos = int(kwargs["position"])
         await self.coordinator.api.control(self._uid, bottom=pos)
@@ -83,7 +104,7 @@ class ShadeAutoCover(CoordinatorEntity[ShadeAutoCoordinator], CoverEntity):
 
     async def async_open_cover(self, **kwargs):
         await self.coordinator.api.control(self._uid, bottom=100)
-        self.coordinator.register_command(self._uid, 100)     
+        self.coordinator.register_command(self._uid, 100)
 
     async def async_close_cover(self, **kwargs):
         await self.coordinator.api.control(self._uid, bottom=0)

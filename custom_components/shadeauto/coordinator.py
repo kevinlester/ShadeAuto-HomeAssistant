@@ -13,31 +13,20 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
 from .api import ShadeAutoApi
-from .const import (
-    DEFAULT_POLL,
-    DEFAULT_NOTIFICATION_TIMEOUT,
-    DEFAULT_VERIFY_ENABLED,
-    DEFAULT_VERIFY_DELAY,
-)
+from .const import DEFAULT_POLL, DEFAULT_NOTIFICATION_TIMEOUT, DEFAULT_VERIFY_ENABLED, DEFAULT_VERIFY_DELAY
 
 _LOGGER = logging.getLogger(__name__)
-
-# Approximate travel time: 0 -> 100 takes ~25 seconds → 0.25s per percent
-UI_SECONDS_PER_PERCENT = 0.25
 
 
 @dataclass
 class ShadeMotionState:
-    """Per-shade motion / verification and UI state."""
+    """Per-shade motion / verification state."""
 
     last_hub_pos: int | None = None
     pending_target: int | None = None
     in_motion: bool = False
     last_control_ts: float | None = None  # monotonic()
     retry_attempted: bool = False
-    # UI-only motion indicator (for opening/closing)
-    ui_motion_dir: int = 0  # +1 opening, -1 closing, 0 idle
-    ui_motion_until: float | None = None  # monotonic timestamp
 
 
 class ShadeAutoCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
@@ -84,7 +73,7 @@ class ShadeAutoCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
     async def _async_update_data(self) -> Dict[str, Any]:
         try:
             status = await self.api.status()
-        except Exception as err:  # transport errors are logged by HA
+        except Exception as err:  # pragma: no cover - transport errors are logged by HA
             raise UpdateFailed(f"status error: {err}") from err
 
         by_uid = self._build_status_by_uid(status)
@@ -112,10 +101,9 @@ class ShadeAutoCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
                 pos_i = None
             state.last_hub_pos = pos_i
 
-            # Use hub truth to decide when motion is actually finished
             if state.in_motion and state.pending_target is not None and pos_i is not None:
                 if abs(pos_i - state.pending_target) <= 2:
-                    _LOGGER.debug(
+                    self.logger.debug(
                         "motion: UID %s hub pos %s ≈ target %s → settled",
                         uid,
                         pos_i,
@@ -127,12 +115,8 @@ class ShadeAutoCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
         return by_uid
 
     def _pending_uids(self) -> list[str]:
-        """Return UIDs that we still consider in-motion for hub tracking."""
-        return [
-            uid
-            for uid, st in self._motion.items()
-            if st.in_motion and st.pending_target is not None
-        ]
+        """Return UIDs that we still consider in-motion."""
+        return [uid for uid, st in self._motion.items() if st.in_motion and st.pending_target is not None]
 
     def _prune_pending_with_cache(self) -> bool:
         """Use cached status to mark shades as done if they already reached their target.
@@ -156,7 +140,7 @@ class ShadeAutoCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
             if pos_i is not None:
                 state.last_hub_pos = pos_i
                 if state.pending_target is not None and abs(pos_i - state.pending_target) <= 2:
-                    _LOGGER.debug(
+                    self.logger.debug(
                         "cache prune: UID %s pos %s ≈ target %s → settled",
                         uid,
                         pos_i,
@@ -168,11 +152,7 @@ class ShadeAutoCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
         return not self._pending_uids()
 
     def get_effective_position(self, uid: str) -> int | None:
-        """Return the position we want the UI to show for a shade.
-
-        While in_motion, we keep reporting the pending target; once finished,
-        we fall back to the latest hub position and, if needed, the cached status.
-        """
+        """Return the position we want the UI to show for a shade."""
         uid = str(uid)
         state = self._motion.get(uid)
         if state and state.in_motion and state.pending_target is not None:
@@ -190,10 +170,6 @@ class ShadeAutoCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
         except (TypeError, ValueError):
             return None
 
-    def get_motion_state(self, uid: str) -> ShadeMotionState | None:
-        """Expose motion state for entities (e.g. to calculate opening/closing)."""
-        return self._motion.get(str(uid))
-
     # --- command / verify / long-poll ---
 
     def register_command(self, uid: str, target: int) -> int:
@@ -208,52 +184,11 @@ class ShadeAutoCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
         state = self._motion.get(uid_s)
         if state is None:
             state = self._motion[uid_s] = ShadeMotionState()
-
-        # Compute pre-command effective position for UI timing
-        base_pos = self.get_effective_position(uid_s)
-        if base_pos is None:
-            base_pos = state.last_hub_pos if state.last_hub_pos is not None else 0
-        try:
-            base_pos_i = int(base_pos)
-        except (TypeError, ValueError):
-            base_pos_i = 0
-
-        # Core motion / fake position
         state.in_motion = True
         state.pending_target = target_i
         state.last_control_ts = now
         state.retry_attempted = False
         self._last_global_control_ts = now
-
-        # UI motion timing based on distance to travel
-        distance = abs(target_i - base_pos_i)
-        duration = distance * UI_SECONDS_PER_PERCENT if distance > 0 else 0.0
-
-        if distance > 0 and duration <= 0:
-            duration = UI_SECONDS_PER_PERCENT
-
-        if distance > 0:
-            if target_i > base_pos_i:
-                state.ui_motion_dir = 1  # opening
-            elif target_i < base_pos_i:
-                state.ui_motion_dir = -1  # closing
-            else:
-                state.ui_motion_dir = 0
-            state.ui_motion_until = now + duration if state.ui_motion_dir != 0 else None
-        else:
-            # No travel → no opening/closing UI indication
-            state.ui_motion_dir = 0
-            state.ui_motion_until = None
-
-        _LOGGER.debug(
-            "register_command: UID %s from %s -> %s (distance=%s) ui_dir=%s, ui_for=%.2fs",
-            uid_s,
-            base_pos_i,
-            target_i,
-            distance,
-            state.ui_motion_dir,
-            duration,
-        )
 
         # Start long-poll watcher once per hub
         if self._notif_task is None or self._notif_task.done():
@@ -292,7 +227,7 @@ class ShadeAutoCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
                     self._last_global_control_ts is not None
                     and now_mono - self._last_global_control_ts > 120.0
                 ):
-                    _LOGGER.warning(
+                    self.logger.warning(
                         "long-poll: >120s since last control; clearing motion state and stopping watcher"
                     )
                     for st in self._motion.values():
@@ -305,7 +240,7 @@ class ShadeAutoCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
 
                 # If the cached status already shows we're done (e.g. due to base 30s poll), exit.
                 if self._prune_pending_with_cache():
-                    _LOGGER.debug("long-poll: pending cleared per cached status, stopping")
+                    self.logger.debug("long-poll: pending cleared per cached status, stopping")
                     break
 
                 ce = getattr(self, "config_entry", None)
@@ -321,14 +256,14 @@ class ShadeAutoCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
                 if self._notif_ts < now_s - 1:
                     self._notif_ts = now_s
 
-                _LOGGER.debug("long-poll: hold %.2fs from ts=%s", timeout, self._notif_ts)
+                self.logger.debug("long-poll: hold %.2fs from ts=%s", timeout, self._notif_ts)
 
                 try:
                     raw = await self.api.notification(timestamp=self._notif_ts, timeout=timeout)
                 except asyncio.CancelledError:
                     raise
                 except Exception:
-                    _LOGGER.exception(
+                    self.logger.exception(
                         "long-poll: notification() failed; will retry while any shade is pending"
                     )
                     await asyncio.sleep(1.0)
@@ -371,11 +306,11 @@ class ShadeAutoCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
                                 self.async_set_updated_data(current)
                 # Normal: loop again until pending clears or failsafe fires
 
-            _LOGGER.info("long-poll: all commanded shades settled; stopping watcher")
+            self.logger.info("long-poll: all commanded shades settled; stopping watcher")
         except asyncio.CancelledError:
             raise
         except Exception:
-            _LOGGER.exception("long-poll watcher error")
+            self.logger.exception("long-poll watcher error")
         finally:
             self._notif_task = None
 
@@ -401,12 +336,9 @@ class ShadeAutoCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
         if cmd_id is not None and (latest is None or latest.get("id") != cmd_id):
             return
 
-        state = self._motion.setdefault(uid_s, ShadeMotionState())
-        if state.retry_attempted:
-            return
-
         # Quick check from motion state first
-        if state.pending_target is not None and state.last_hub_pos is not None:
+        state = self._motion.get(uid_s)
+        if state and state.pending_target is not None and state.last_hub_pos is not None:
             if abs(state.last_hub_pos - state.pending_target) <= 2:
                 return
 
@@ -420,7 +352,7 @@ class ShadeAutoCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
             pos = None
 
         if (pos is None or abs(pos - int(target)) > 2) and latest and latest.get("id") == cmd_id:
-            _LOGGER.debug(
+            self.logger.debug(
                 "verify_and_retry: UID %s not at target after %.1fs (pos=%s, want=%s) -> retry",
                 uid_s,
                 delay,
@@ -428,6 +360,7 @@ class ShadeAutoCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
                 target,
             )
             # Mark as retried and send one more control
+            state = self._motion.setdefault(uid_s, ShadeMotionState())
             state.retry_attempted = True
             state.last_control_ts = time.monotonic()
             self._last_global_control_ts = state.last_control_ts

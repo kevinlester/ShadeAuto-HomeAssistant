@@ -5,6 +5,7 @@
         "title": "ShadeAuto options",
         "description": "Tuning for pacing, verification and polling.",
         "data": {
+          "host": "Hub IP / Hostname",
           "poll_seconds": "Poll interval for shade status (seconds)",
           "burst_interval": "Burst poll interval after a command (s)",
           "burst_cycles": "Burst poll cycles",

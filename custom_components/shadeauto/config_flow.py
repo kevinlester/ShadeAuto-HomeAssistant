@@ -48,7 +48,10 @@ class ShadeAutoOptionsFlow(config_entries.OptionsFlow):
         self.entry = entry
 
     async def async_step_init(self, user_input: dict[str, Any] | None = None) -> FlowResult:
+        current_host = self.entry.data.get(CONF_HOST, "")
         schema = vol.Schema({
+            vol.Optional("host", default=current_host): selector({"text": {}}),
+
             vol.Optional("poll_seconds", default=self.entry.options.get("poll_seconds", DEFAULT_POLL)):
                 selector({"number": {"min": 5, "max": 120, "step": 1, "unit_of_measurement": "s", "mode": "box"}}),
 
@@ -71,5 +74,14 @@ class ShadeAutoOptionsFlow(config_entries.OptionsFlow):
                 selector({"number": {"min": 1, "max": 60, "step": 1, "unit_of_measurement": "s"}}),
         })
         if user_input is not None:
-            return self.async_create_entry(title="", data=user_input)
+            # If host changed, update entry.data and reload
+            new_host = user_input.get("host", current_host)
+            if new_host and new_host != current_host:
+                new_data = {**self.entry.data, CONF_HOST: new_host}
+                self.hass.config_entries.async_update_entry(self.entry, data=new_data)
+                await self.hass.config_entries.async_reload(self.entry.entry_id)
+            # Store the rest as options
+            opts = dict(user_input)
+            opts.pop("host", None)
+            return self.async_create_entry(title="", data=opts)
         return self.async_show_form(step_id="init", data_schema=schema)

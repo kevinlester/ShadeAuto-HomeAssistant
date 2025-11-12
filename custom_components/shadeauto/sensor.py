@@ -48,7 +48,8 @@ class ShadeAutoBattery(CoordinatorEntity[ShadeAutoCoordinator], SensorEntity):
         self._entry = entry
         self._uid = uid
         self._attr_name = name
-        self._attr_unique_id = f"shadeauto_{coordinator.api.host}_{uid}_battery"
+        thing = coordinator.data.get("thing_name") or coordinator.api.host
+        self._attr_unique_id = f"shadeauto_{thing}_{uid}_battery"
 
     @property
     def available(self) -> bool:

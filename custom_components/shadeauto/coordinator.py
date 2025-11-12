@@ -22,16 +22,22 @@ from .const import (
 
 _LOGGER = logging.getLogger(__name__)
 
+# Approximate travel time: 0 -> 100 takes ~25 seconds → 0.25s per percent
+UI_SECONDS_PER_PERCENT = 0.25
+
 
 @dataclass
 class ShadeMotionState:
-    """Per-shade motion / verification state."""
+    """Per-shade motion / verification and UI state."""
 
     last_hub_pos: int | None = None
     pending_target: int | None = None
     in_motion: bool = False
     last_control_ts: float | None = None  # monotonic()
     retry_attempted: bool = False
+    # UI-only motion indicator (for opening/closing)
+    ui_motion_dir: int = 0  # +1 opening, -1 closing, 0 idle
+    ui_motion_until: float | None = None  # monotonic timestamp
 
 
 class ShadeAutoCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
@@ -106,6 +112,7 @@ class ShadeAutoCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
                 pos_i = None
             state.last_hub_pos = pos_i
 
+            # Use hub truth to decide when motion is actually finished
             if state.in_motion and state.pending_target is not None and pos_i is not None:
                 if abs(pos_i - state.pending_target) <= 2:
                     _LOGGER.debug(
@@ -120,7 +127,7 @@ class ShadeAutoCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
         return by_uid
 
     def _pending_uids(self) -> list[str]:
-        """Return UIDs that we still consider in-motion."""
+        """Return UIDs that we still consider in-motion for hub tracking."""
         return [
             uid
             for uid, st in self._motion.items()
@@ -161,7 +168,11 @@ class ShadeAutoCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
         return not self._pending_uids()
 
     def get_effective_position(self, uid: str) -> int | None:
-        """Return the position we want the UI to show for a shade."""
+        """Return the position we want the UI to show for a shade.
+
+        While in_motion, we keep reporting the pending target; once finished,
+        we fall back to the latest hub position and, if needed, the cached status.
+        """
         uid = str(uid)
         state = self._motion.get(uid)
         if state and state.in_motion and state.pending_target is not None:
@@ -197,11 +208,52 @@ class ShadeAutoCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
         state = self._motion.get(uid_s)
         if state is None:
             state = self._motion[uid_s] = ShadeMotionState()
+
+        # Core motion / fake position
         state.in_motion = True
         state.pending_target = target_i
         state.last_control_ts = now
         state.retry_attempted = False
         self._last_global_control_ts = now
+
+        # UI motion timing based on distance to travel
+        # Use effective position first, then last_hub_pos, else assume 0 as baseline.
+        base_pos = self.get_effective_position(uid_s)
+        if base_pos is None:
+            base_pos = state.last_hub_pos if state.last_hub_pos is not None else 0
+        try:
+            base_pos_i = int(base_pos)
+        except (TypeError, ValueError):
+            base_pos_i = 0
+
+        distance = abs(target_i - base_pos_i)
+        duration = distance * UI_SECONDS_PER_PERCENT if distance > 0 else 0.0
+
+        if distance > 0 and duration <= 0:
+            duration = UI_SECONDS_PER_PERCENT
+
+        if distance > 0:
+            if target_i > base_pos_i:
+                state.ui_motion_dir = 1  # opening
+            elif target_i < base_pos_i:
+                state.ui_motion_dir = -1  # closing
+            else:
+                state.ui_motion_dir = 0
+            state.ui_motion_until = now + duration if state.ui_motion_dir != 0 else None
+        else:
+            # No travel → no opening/closing UI indication
+            state.ui_motion_dir = 0
+            state.ui_motion_until = None
+
+        _LOGGER.debug(
+            "register_command: UID %s from %s -> %s (distance=%s) ui_dir=%s, ui_for=%.2fs",
+            uid_s,
+            base_pos_i,
+            target_i,
+            distance,
+            state.ui_motion_dir,
+            duration,
+        )
 
         # Start long-poll watcher once per hub
         if self._notif_task is None or self._notif_task.done():
@@ -349,9 +401,12 @@ class ShadeAutoCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
         if cmd_id is not None and (latest is None or latest.get("id") != cmd_id):
             return
 
+        state = self._motion.setdefault(uid_s, ShadeMotionState())
+        if state.retry_attempted:
+            return
+
         # Quick check from motion state first
-        state = self._motion.get(uid_s)
-        if state and state.pending_target is not None and state.last_hub_pos is not None:
+        if state.pending_target is not None and state.last_hub_pos is not None:
             if abs(state.last_hub_pos - state.pending_target) <= 2:
                 return
 
@@ -373,7 +428,6 @@ class ShadeAutoCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
                 target,
             )
             # Mark as retried and send one more control
-            state = self._motion.setdefault(uid_s, ShadeMotionState())
             state.retry_attempted = True
             state.last_control_ts = time.monotonic()
             self._last_global_control_ts = state.last_control_ts

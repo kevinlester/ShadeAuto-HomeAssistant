@@ -60,11 +60,16 @@ class ShadeAutoCover(CoordinatorEntity[ShadeAutoCoordinator], CoverEntity):
 
     @property
     def current_cover_position(self) -> int | None:
-        pos = self._status_for_uid().get("BottomRailPosition")
+        """Report the shade position, faking while in motion if needed."""
         try:
-            return int(pos) if pos is not None else None
-        except (TypeError, ValueError):
-            return None
+            return self.coordinator.get_effective_position(self._uid)
+        except Exception:
+            # Fallback to raw hub status if motion state isn't available
+            pos = self._status_for_uid().get("BottomRailPosition")
+            try:
+                return int(pos) if pos is not None else None
+            except (TypeError, ValueError):
+                return None
 
     @property
     def is_closed(self) -> bool | None:
@@ -73,39 +78,13 @@ class ShadeAutoCover(CoordinatorEntity[ShadeAutoCoordinator], CoverEntity):
 
     async def async_set_cover_position(self, **kwargs):
         pos = int(kwargs["position"])
-        before = None
-        st = self.coordinator.data.get("status", {}).get(self._uid, {})
-        if st and "BottomRailPosition" in st:
-            try:
-                before = int(st["BottomRailPosition"])
-            except (TypeError, ValueError):
-                before = None
         await self.coordinator.api.control(self._uid, bottom=pos)
-        cmd_id = self.coordinator.register_command(self._uid, pos)
-        # option-driven verify/retry
-        if bool(self._entry.options.get("verify_enabled", True)):
-            delay = float(self._entry.options.get("verify_delay_sec", 20.0))
-            await self.coordinator.async_verify_and_retry(self._uid, pos, prev=before, delay=delay, cmd_id=cmd_id)
-        interval = float(self._entry.options.get("burst_interval", 2))
-        cycles = int(self._entry.options.get("burst_cycles", 5))
-        await self.coordinator.async_burst_refresh(interval, cycles)
+        self.coordinator.register_command(self._uid, pos)
 
     async def async_open_cover(self, **kwargs):
         await self.coordinator.api.control(self._uid, bottom=100)
-        cmd_id = self.coordinator.register_command(self._uid, 100)        
-        if bool(self._entry.options.get("verify_enabled", True)):
-            delay = float(self._entry.options.get("verify_delay_sec", 20.0))
-            await self.coordinator.async_verify_and_retry(self._uid, 100, prev=None, delay=delay, cmd_id=cmd_id)            
-        interval = float(self._entry.options.get("burst_interval", 2))
-        cycles = int(self._entry.options.get("burst_cycles", 5))
-        await self.coordinator.async_burst_refresh(interval, cycles)        
+        self.coordinator.register_command(self._uid, 100)     
 
     async def async_close_cover(self, **kwargs):
         await self.coordinator.api.control(self._uid, bottom=0)
-        cmd_id = self.coordinator.register_command(self._uid, 0)
-        if bool(self._entry.options.get("verify_enabled", True)):
-            delay = float(self._entry.options.get("verify_delay_sec", 20.0))
-            await self.coordinator.async_verify_and_retry(self._uid, 0, prev=None, delay=delay, cmd_id=cmd_id)
-        interval = float(self._entry.options.get("burst_interval", 2))
-        cycles = int(self._entry.options.get("burst_cycles", 5))
-        await self.coordinator.async_burst_refresh(interval, cycles)
+        self.coordinator.register_command(self._uid, 0)

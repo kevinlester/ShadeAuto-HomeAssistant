@@ -9,9 +9,14 @@ from homeassistant.data_entry_flow import FlowResult
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from .const import (
-    DOMAIN, CONF_HOST,
-    DEFAULT_POLL, DEFAULT_BURST_INTERVAL, DEFAULT_BURST_CYCLES, DEFAULT_LOW_BATT,
-    DEFAULT_SEND_SPACING, DEFAULT_VERIFY_ENABLED, DEFAULT_VERIFY_DELAY
+    DOMAIN,
+    CONF_HOST,
+    DEFAULT_POLL,
+    DEFAULT_LOW_BATT,
+    DEFAULT_SEND_SPACING,
+    DEFAULT_VERIFY_ENABLED,
+    DEFAULT_VERIFY_DELAY,
+    DEFAULT_NOTIFICATION_TIMEOUT,
 )
 from .api import ShadeAutoApi
 
@@ -53,15 +58,7 @@ class ShadeAutoOptionsFlow(config_entries.OptionsFlow):
             vol.Optional("host", default=current_host): selector({"text": {}}),
 
             vol.Optional("poll_seconds", default=self.entry.options.get("poll_seconds", DEFAULT_POLL)):
-                selector({"number": {"min": 5, "max": 120, "step": 1, "unit_of_measurement": "s", "mode": "box"}}),
-
-            vol.Optional("burst_interval", default=self.entry.options.get("burst_interval", DEFAULT_BURST_INTERVAL)):
-                selector({"number": {"min": 0.5, "max": 10, "step": 0.1, "unit_of_measurement": "s"}}),
-
-            vol.Optional("burst_cycles", default=self.entry.options.get("burst_cycles", DEFAULT_BURST_CYCLES)):
-                selector({"number": {"min": 0, "max": 10, "step": 1}}),
-
-            vol.Optional("low_battery_threshold", default=self.entry.options.get("low_battery_threshold", DEFAULT_LOW_BATT)):
+                selector({"number": {"min": 5, "max": 120, "step": 1, "unit_of_measurement": "s", "mode": "box"}}),vol.Optional("low_battery_threshold", default=self.entry.options.get("low_battery_threshold", DEFAULT_LOW_BATT)):
                 selector({"number": {"min": 5, "max": 50, "step": 1, "unit_of_measurement": "%"}}),
 
             vol.Optional("send_spacing_sec", default=self.entry.options.get("send_spacing_sec", DEFAULT_SEND_SPACING)):
@@ -72,6 +69,10 @@ class ShadeAutoOptionsFlow(config_entries.OptionsFlow):
 
             vol.Optional("verify_delay_sec", default=self.entry.options.get("verify_delay_sec", DEFAULT_VERIFY_DELAY)):
                 selector({"number": {"min": 1, "max": 60, "step": 1, "unit_of_measurement": "s"}}),
+
+            vol.Optional("notification_timeout_sec", default=self.entry.options.get("notification_timeout_sec", DEFAULT_NOTIFICATION_TIMEOUT)): 
+                selector({"number":{"min":-1,"max":10,"step":1,"unit_of_measurement":"s"}}),
+
         })
         if user_input is not None:
             # If host changed, update entry.data and reload

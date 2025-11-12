@@ -15,9 +15,12 @@ Control Norman **ShadeAuto** shades locally via the hub’s undocumented HTTP AP
 - Works with **multiple hubs** (add each hub by IP).
 
 ## Options
-- **Poll seconds**: default 30s idle polling.
-- **Burst interval / cycles**: fast polls after a move (e.g., 2s × 5).
-- **Low battery threshold**: default 20% for the `*_battery_low` binary sensor.
+- **Poll seconds**: idle `/status` poll interval while shades are not moving (default 30s).
+- **Low battery threshold**: battery % at which the `*_battery_low` flag turns on (default 20%).
+- **Min time between shade commands**: enforces a small gap between hub `/control` posts (helps avoid overload).
+- **Verify & retry once**: when enabled, checks a shade after a delay and sends one extra `/control` if it isn’t near the last requested position.
+- **Verify delay (sec)**: how long to wait before verifying/retrying the last command.
+- **Notification timeout (sec)**: hold time for the hub’s long‑poll `/notification` request; `-1` lets the hub hold the connection open.
 
 ## Entities per shade (unique device)
 - `cover.<shade>`: open/close/set position (0–100)

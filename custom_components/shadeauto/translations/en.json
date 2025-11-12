@@ -17,12 +17,11 @@
         "data": {
           "host": "Hub IP / Hostname",
           "poll_seconds": "Poll interval (seconds)",
-          "burst_interval": "Burst poll interval after command (s)",
-          "burst_cycles": "Burst poll cycles",
           "low_battery_threshold": "Low battery threshold (%)",
           "send_spacing_sec": "Min time between shade commands (s)",
           "verify_enabled": "Verify & retry once if needed",
-          "verify_delay_sec": "Seconds to wait before verifing shade is in desired position (and retrying if not)"
+          "verify_delay_sec": "Seconds to wait before verifing shade is in desired position (and retrying if not)",
+          "notification_timeout_sec": "Notification hold timeout (seconds; -1 for infinite)"
         }
       }
     }

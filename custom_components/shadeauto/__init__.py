@@ -25,6 +25,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     poll = entry.options.get("poll_seconds", DEFAULT_POLL)
     coordinator = ShadeAutoCoordinator(hass, api, poll)
+    coordinator.config_entry = entry  # so the watcher can read options
     await coordinator.async_config_entry_first_refresh()
 
     # Ensure a hub device exists for via_device references
@@ -83,5 +84,5 @@ def _apply_options_to_runtime(hass: HomeAssistant, entry: ConfigEntry) -> None:
     except Exception:
         pass
 
-    # Other options (burst/verify/low_battery) are consumed dynamically
+    # Other options (verify/low_battery/notification) are consumed dynamically
     # by cover/sensor/binary_sensor at call/evaluation time.

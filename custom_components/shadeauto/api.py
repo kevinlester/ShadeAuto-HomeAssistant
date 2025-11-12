@@ -83,6 +83,29 @@ class ShadeAutoApi:
             pass
         return items
 
+    async def notification(self, *, timestamp: int, timeout: float) -> str:
+        """Call long-poll notification; return raw (possibly concatenated) JSON text."""
+        payload = {
+            "ThingName": self.thing_name,
+            "Timestamp": int(timestamp),
+            "Timeout": float(timeout),
+        }
+        url = f"{self._base}/NM/v1/notification"
+        client_timeout = None if timeout == -1 else timeout + 5
+        _LOGGER.debug("Notification timeout %d", timeout)
+        # Allow the server's hold; only bound the *read* time with some slack
+        # Bound the read with the user-requested timeout (no extra slack)
+        timeout = float(timeout)
+        timeout_cfg = ClientTimeout(total=None, sock_connect=10, sock_read=timeout)
+
+        try:
+            async with self._session.post(url, json=payload, timeout=timeout_cfg) as resp:
+                resp.raise_for_status()
+                return await resp.text()
+        except asyncio.TimeoutError:
+            _LOGGER.debug("notification: client read timeout after %.2fs (no events this window)", timeout)
+            return ""
+
     def _task_id(self) -> int:
         # millisecond-ish unique ID in signed 31-bit range
         return int(time.time() * 1000) & 0x7FFFFFFF

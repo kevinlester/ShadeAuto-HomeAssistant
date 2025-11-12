@@ -81,28 +81,31 @@ class ShadeAutoCover(CoordinatorEntity[ShadeAutoCoordinator], CoverEntity):
             except (TypeError, ValueError):
                 before = None
         await self.coordinator.api.control(self._uid, bottom=pos)
+        cmd_id = self.coordinator.register_command(self._uid, pos)
         # option-driven verify/retry
         if bool(self._entry.options.get("verify_enabled", True)):
             delay = float(self._entry.options.get("verify_delay_sec", 20.0))
-            await self.coordinator.async_verify_and_retry(self._uid, pos, prev=before, delay=delay)
+            await self.coordinator.async_verify_and_retry(self._uid, pos, prev=before, delay=delay, cmd_id=cmd_id)
         interval = float(self._entry.options.get("burst_interval", 2))
         cycles = int(self._entry.options.get("burst_cycles", 5))
         await self.coordinator.async_burst_refresh(interval, cycles)
 
     async def async_open_cover(self, **kwargs):
         await self.coordinator.api.control(self._uid, bottom=100)
+        cmd_id = self.coordinator.register_command(self._uid, 100)        
         if bool(self._entry.options.get("verify_enabled", True)):
             delay = float(self._entry.options.get("verify_delay_sec", 20.0))
-            await self.coordinator.async_verify_and_retry(self._uid, 100, prev=None, delay=delay)        
+            await self.coordinator.async_verify_and_retry(self._uid, 100, prev=None, delay=delay, cmd_id=cmd_id)            
         interval = float(self._entry.options.get("burst_interval", 2))
         cycles = int(self._entry.options.get("burst_cycles", 5))
-        await self.coordinator.async_burst_refresh(interval, cycles)
+        await self.coordinator.async_burst_refresh(interval, cycles)        
 
     async def async_close_cover(self, **kwargs):
         await self.coordinator.api.control(self._uid, bottom=0)
+        cmd_id = self.coordinator.register_command(self._uid, 0)
         if bool(self._entry.options.get("verify_enabled", True)):
             delay = float(self._entry.options.get("verify_delay_sec", 20.0))
-            await self.coordinator.async_verify_and_retry(self._uid, 0, prev=None, delay=delay)        
+            await self.coordinator.async_verify_and_retry(self._uid, 0, prev=None, delay=delay, cmd_id=cmd_id)
         interval = float(self._entry.options.get("burst_interval", 2))
         cycles = int(self._entry.options.get("burst_cycles", 5))
         await self.coordinator.async_burst_refresh(interval, cycles)

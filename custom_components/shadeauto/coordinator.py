@@ -25,6 +25,9 @@ class ShadeAutoCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
         )
         self.api = api
         self._peripherals: Dict[str, Dict[str, Any]] = {}
+        self._cmd_seq = 0
+        self._last_cmd: Dict[str, Dict[str, Any]] = {}  # uid -> {id:int, target:int, t:float}
+
 
     @property
     def peripherals(self) -> Dict[str, Dict[str, Any]]:
@@ -71,12 +74,29 @@ class ShadeAutoCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
             await self.async_request_refresh()
             await asyncio.sleep(delay)
 
+    def register_command(self, uid: str, target: int) -> int:
+        """Record latest command for a shade and return a command id token."""
+        import time
+        self._cmd_seq += 1
+        cid = self._cmd_seq
+        self._last_cmd[str(uid)] = {"id": cid, "target": int(target), "t": time.monotonic()}
+        return cid
+
     async def async_verify_and_retry(
         self, uid: str, target: int, *, prev: int | None = None,
-        moved_threshold: int = 1, delay: float = 0.50
+        moved_threshold: int = 1, delay: float = 20.0, cmd_id: int | None = None
     ) -> None:
-        """Retry once only if the shade hasn't started moving after the command."""
+        """Retry once only if this command is still latest and shade isn't at target."""
+        # If superseded before we even wait, do nothing.
+        latest = self._last_cmd.get(str(uid))
+        if cmd_id is not None and (latest is None or latest.get("id") != cmd_id):
+            return
+
         await asyncio.sleep(max(0.1, delay))
+        # If a newer command arrived while we were waiting, exit.
+        latest = self._last_cmd.get(str(uid))
+        if cmd_id is not None and (latest is None or latest.get("id") != cmd_id):
+            return
         await self.async_request_refresh()
         st = self.data.get("status", {}).get(str(uid), {})
         pos_raw = st.get("BottomRailPosition")
@@ -84,8 +104,9 @@ class ShadeAutoCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
             pos = int(pos_raw) if pos_raw is not None else None
         except (TypeError, ValueError):
             pos = None
-        # If we have a 'before' reading and the position hasn't changed by >= moved_threshold, resend once.
-        if prev is not None and pos is not None and abs(pos - int(prev)) < moved_threshold:
-            _LOGGER.debug("verify_and_retry: UID %s did not move (prev=%s, now=%s); retrying once", uid, prev, pos)
+        # Hub reports only final: retry iff not at (or very near) target; still the same command.
+        if (pos is None or abs(pos - int(target)) > 2) and latest and latest.get("id") == cmd_id:
+            _LOGGER.debug("verify_and_retry: UID %s not at target after %.1fs (pos=%s, want=%s) -> retry",
+                          uid, delay, pos, target)
             await self.api.control(uid, bottom=int(target))
             await self.async_request_refresh()

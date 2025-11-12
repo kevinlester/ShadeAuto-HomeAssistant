@@ -7,20 +7,12 @@ Control Norman **ShadeAuto** shades locally via the hub’s undocumented HTTP AP
 ---
 
 ## Features
-- **Auto-discover shades** from any detected ShadeAuto hub(s).
+- **Auto-discover shades** from any ShadeAuto hub(s).
 - One **Device** per discovered Shade
   - One **Cover** entity per shade: open/close/**set position** (0–100).
   - One **Battery (%)** sensor per shade.
   - One **Low Battery (%)** flag per shade.
 - Works with **multiple hubs** (add each hub by IP).
-
-## Options
-- **Poll seconds**: idle `/status` poll interval while shades are not moving (default 30s).
-- **Low battery threshold**: battery % at which the `*_battery_low` flag turns on (default 20%).
-- **Min time between shade commands**: enforces a small gap between hub `/control` posts (helps avoid overload).
-- **Verify & retry once**: when enabled, checks a shade after a delay and sends one extra `/control` if it isn’t near the last requested position.
-- **Verify delay (sec)**: how long to wait before verifying/retrying the last command.
-- **Notification timeout (sec)**: hold time for the hub’s long‑poll `/notification` request; `-1` lets the hub hold the connection open.
 
 ## Entities per shade (unique device)
 - `cover.<shade>`: open/close/set position (0–100)
@@ -33,6 +25,14 @@ Control Norman **ShadeAuto** shades locally via the hub’s undocumented HTTP AP
 ## Requirements
 - ShadeAuto hub reachable on your LAN (port **10123**).
 - Home Assistant 2024.6+ (tested).
+
+## Options
+- **Poll seconds**: idle `/status` poll interval while shades are not moving (default 30s).
+- **Low battery threshold**: battery % at which the `*_battery_low` flag turns on (default 20%).
+- **Min time between shade commands**: enforces a small gap between hub `/control` posts (helps avoid overload).
+- **Verify & retry once**: when enabled, checks a shade after a delay and sends one extra `/control` if it isn’t near the last requested position.
+- **Verify delay (sec)**: how long to wait before verifying/retrying the last command.
+- **Notification timeout (sec)**: hold time for the hub’s long‑poll `/notification` request; `-1` lets the hub hold the connection open.
 
 ## Installation
 
@@ -50,10 +50,6 @@ Then
 ### Manual
 1. Copy `custom_components/shadeauto/` into your HA `config/custom_components/`.
 2. Restart HA, then add the integration.
-
-## Configuration
-- **Host**: hub IP (e.g., `192.168.1.50`).
-- **Options** → *Poll seconds*: default **30s**. (Faster polling increases traffic.)
 
 ## Example use
 
@@ -105,6 +101,8 @@ action:
       message: "Deck Shade battery is at {{ states('sensor.deck_shade_battery') }}%."
 ```
 
+## New Feature Requests
+Create new feature requests via creating a new Github Issue in this repo.  Note that testing might require some assistance from your side in case the necessary hardware is unavailable to the devs.
 
 ## Troubleshooting
 - **No entities?** Ensure the hub is reachable; try curl:

@@ -14,7 +14,9 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .const import DOMAIN
 from .coordinator import ShadeAutoCoordinator
+import logging
 
+_LOGGER = logging.getLogger(__name__)
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, add_entities: AddEntitiesCallback):
     data = hass.data[DOMAIN][entry.entry_id]
@@ -62,13 +64,29 @@ class ShadeAutoCover(CoordinatorEntity[ShadeAutoCoordinator], CoverEntity):
     def current_cover_position(self) -> int | None:
         """Report the shade position, faking while in motion if needed."""
         try:
-            return self.coordinator.get_effective_position(self._uid)
+            val = self.coordinator.get_effective_position(self._uid)
+            # Optional: peek at motion state if the coordinator has it
+            motion_state = getattr(getattr(self.coordinator, "_motion", {}), "get", lambda *_: None)(self._uid)
+            _LOGGER.debug(
+                "pos_debug: current_cover_position uid=%s -> %s (from get_effective_position, state=%s)",
+                self._uid,
+                val,
+                motion_state,
+            )
+            return val
         except Exception:
             # Fallback to raw hub status if motion state isn't available
-            pos = self._status_for_uid().get("BottomRailPosition")
+            st = self._status_for_uid()
+            pos = st.get("BottomRailPosition")
+            _LOGGER.debug(
+                "pos_debug: current_cover_position uid=%s -> raw=%s (fallback path)",
+                self._uid,
+                pos,
+            )
             try:
                 return int(pos) if pos is not None else None
             except (TypeError, ValueError):
+                _LOGGER.exception("pos_debug: current_cover_position uid=%s Error",self._uid)
                 return None
 
     @property

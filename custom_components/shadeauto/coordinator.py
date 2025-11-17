@@ -21,12 +21,13 @@ _LOGGER = logging.getLogger(__name__)
 @dataclass
 class ShadeMotionState:
     """Per-shade motion / verification state."""
-
     last_hub_pos: int | None = None
     pending_target: int | None = None
     in_motion: bool = False
     last_control_ts: float | None = None  # monotonic()
     retry_attempted: bool = False
+    start_pos: int | None = None          # hub pos at time of last command
+    saw_move_since_cmd: bool = False      # have we seen a different pos since that command?
 
 
 class ShadeAutoCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
@@ -99,10 +100,30 @@ class ShadeAutoCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
                 pos_i = int(pos) if pos is not None else None
             except (TypeError, ValueError):
                 pos_i = None
+            state = getattr(self, "_motion", {}).get(uid)
+            _LOGGER.debug(
+                "pos_debug: status uid=%s raw=%s pos_i=%s state_exists=%s in_motion=%s pending=%s last_hub_pos=%s",
+                uid,
+                pos,
+                pos_i,
+                state is not None,
+                getattr(state, "in_motion", None),
+                getattr(state, "pending_target", None),
+                getattr(state, "last_hub_pos", None),
+            )
             state.last_hub_pos = pos_i
 
+            # If we have a baseline for this command and we've seen a different pos,
+            # remember that we've observed actual motion since the command started.
+            if (
+                state.start_pos is not None
+                and pos_i is not None
+                and abs(pos_i - state.start_pos) > 2
+            ):
+                state.saw_move_since_cmd = True
+
             if state.in_motion and state.pending_target is not None and pos_i is not None:
-                if abs(pos_i - state.pending_target) <= 2:
+                if abs(pos_i - state.pending_target) <= 2 and state.saw_move_since_cmd:
                     self.logger.debug(
                         "motion: UID %s hub pos %s ≈ target %s → settled",
                         uid,
@@ -139,7 +160,7 @@ class ShadeAutoCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
             state = self._motion.setdefault(uid, ShadeMotionState())
             if pos_i is not None:
                 state.last_hub_pos = pos_i
-                if state.pending_target is not None and abs(pos_i - state.pending_target) <= 2:
+                if state.pending_target is not None and abs(pos_i - state.pending_target) <= 2 and state.saw_move_since_cmd:
                     self.logger.debug(
                         "cache prune: UID %s pos %s ≈ target %s → settled",
                         uid,
@@ -152,23 +173,46 @@ class ShadeAutoCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
         return not self._pending_uids()
 
     def get_effective_position(self, uid: str) -> int | None:
-        """Return the position we want the UI to show for a shade."""
         uid = str(uid)
-        state = self._motion.get(uid)
-        if state and state.in_motion and state.pending_target is not None:
-            return state.pending_target
-        if state and state.last_hub_pos is not None:
-            return state.last_hub_pos
-
-        # Fallback: derive from cached data if we don't have a motion state (e.g. right after restart)
+        state = getattr(self, "_motion", {}).get(uid)
+        raw = None
+        # Try to read the cached hub value for debug purposes
         try:
             raw = (self.data or {}).get("status", {}).get(uid, {}).get("BottomRailPosition")
         except Exception:
-            raw = None
+            pass
+
+        if state and state.in_motion and state.pending_target is not None:
+            _LOGGER.debug(
+                "pos_debug: get_effective_position uid=%s -> pending=%s (in_motion=True, last_hub_pos=%s, raw=%s)",
+                uid,
+                state.pending_target,
+                getattr(state, "last_hub_pos", None),
+                raw,
+            )
+            return state.pending_target
+
+        if state and state.last_hub_pos is not None:
+            _LOGGER.debug(
+                "pos_debug: get_effective_position uid=%s -> last_hub_pos=%s (in_motion=%s, pending=%s, raw=%s)",
+                uid,
+                state.last_hub_pos,
+                getattr(state, "in_motion", None),
+                getattr(state, "pending_target", None),
+                raw,
+            )
+            return state.last_hub_pos
+
+        _LOGGER.debug(
+            "pos_debug: get_effective_position uid=%s -> raw=%s (no state or no motion)",
+            uid,
+            raw,
+        )
         try:
             return int(raw) if raw is not None else None
         except (TypeError, ValueError):
             return None
+
 
     # --- command / verify / long-poll ---
 
@@ -184,6 +228,11 @@ class ShadeAutoCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
         state = self._motion.get(uid_s)
         if state is None:
             state = self._motion[uid_s] = ShadeMotionState()
+
+        # Baseline for this command: where did the hub think we were when we started?
+        state.start_pos = state.last_hub_pos
+        state.saw_move_since_cmd = False
+        
         state.in_motion = True
         state.pending_target = target_i
         state.last_control_ts = now
@@ -350,7 +399,14 @@ class ShadeAutoCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
             pos = int(pos_raw) if pos_raw is not None else None
         except (TypeError, ValueError):
             pos = None
-
+            state = getattr(self, "_motion", {}).get(uid_s)
+            _LOGGER.debug(
+                "pos_debug_1: verify uid=%s state_before_retry in_motion=%s pending=%s last_hub_pos=%s",
+                uid_s,
+                getattr(state, "in_motion", None),
+                getattr(state, "pending_target", None),
+                getattr(state, "last_hub_pos", None),
+            )
         if (pos is None or abs(pos - int(target)) > 2) and latest and latest.get("id") == cmd_id:
             self.logger.debug(
                 "verify_and_retry: UID %s not at target after %.1fs (pos=%s, want=%s) -> retry",
@@ -361,8 +417,32 @@ class ShadeAutoCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
             )
             # Mark as retried and send one more control
             state = self._motion.setdefault(uid_s, ShadeMotionState())
+            state2 = getattr(self, "_motion", {}).get(uid_s)
+            _LOGGER.debug(
+                "pos_debug_2: verify uid=%s state_before_retry in_motion=%s pending=%s last_hub_pos=%s",
+                uid_s,
+                getattr(state2, "in_motion", None),
+                getattr(state2, "pending_target", None),
+                getattr(state2, "last_hub_pos", None),
+            )
             state.retry_attempted = True
             state.last_control_ts = time.monotonic()
             self._last_global_control_ts = state.last_control_ts
             await self.api.control(uid_s, bottom=int(target))
+            state = getattr(self, "_motion", {}).get(uid_s)
+            _LOGGER.debug(
+                "pos_debug_3: verify uid=%s state_before_retry in_motion=%s pending=%s last_hub_pos=%s",
+                uid_s,
+                getattr(state, "in_motion", None),
+                getattr(state, "pending_target", None),
+                getattr(state, "last_hub_pos", None),
+            )
             await self.async_request_refresh()
+            state = getattr(self, "_motion", {}).get(uid_s)
+            _LOGGER.debug(
+                "pos_debug_4: verify uid=%s state_before_retry in_motion=%s pending=%s last_hub_pos=%s",
+                uid_s,
+                getattr(state, "in_motion", None),
+                getattr(state, "pending_target", None),
+                getattr(state, "last_hub_pos", None),
+            )

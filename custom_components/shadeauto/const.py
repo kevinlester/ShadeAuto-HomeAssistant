@@ -15,4 +15,8 @@ DEFAULT_VERIFY_ENABLED = True
 DEFAULT_VERIFY_DELAY = 60.0     # seconds to wait before verifying position / retry
 DEFAULT_NOTIFICATION_TIMEOUT = 2.0   # seconds to hold each long-poll before returning
 
+# Motion estimation defaults
+DEFAULT_FULL_TRAVEL_TIME = 28.0      # seconds to move from 0 -> 100
+DEFAULT_ESTIMATION_ENABLED = True    # enable opening/closing & estimation by default
+
 PORT = 10123

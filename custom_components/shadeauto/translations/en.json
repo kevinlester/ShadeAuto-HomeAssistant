@@ -21,7 +21,9 @@
           "send_spacing_sec": "Min time between shade commands (s)",
           "verify_enabled": "Verify & retry once if needed",
           "verify_delay_sec": "Seconds to wait before verifing shade is in desired position (and retrying if not)",
-          "notification_timeout_sec": "Notification hold timeout (seconds; -1 for infinite)"
+          "notification_timeout_sec": "Notification hold timeout (seconds; -1 for infinite)",
+          "estimation_enabled": "Enable time-based position & state estimation",
+          "full_travel_time_sec": "Estimated time to fully open (seconds)"
         }
       }
     }

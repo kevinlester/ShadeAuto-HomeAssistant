@@ -1,6 +1,6 @@
 # ShadeAuto (local) — Home Assistant Custom Integration
 
-Control Norman **ShadeAuto** shades locally via the hub’s undocumented HTTP API.  
+Control Norman **ShadeAuto** shades locally via the hub’s undocumented HTTP API.  Support for all the usual `cover` UI features like current state, moving positions, and icon updates.
 
 ---
 > ⚠️ This uses **undocumented** local endpoints (`/NM/v1/*`). Firmware may change behavior. Isolate the hub and restrict access to TCP **10123**.
@@ -32,7 +32,9 @@ Control Norman **ShadeAuto** shades locally via the hub’s undocumented HTTP AP
 - **Min time between shade commands**: enforces a small gap between hub `/control` posts (helps avoid overload).
 - **Verify & retry once**: when enabled, checks a shade after a delay and sends one extra `/control` if it isn’t near the last requested position.
 - **Verify delay (sec)**: how long to wait before verifying/retrying the last command.
-- **Notification timeout (sec)**: hold time for the hub’s long‑poll `/notification` request; `-1` lets the hub hold the connection open.
+- **Notification timeout (sec)**: hold time for the hub’s long-poll `/notification` request; `-1` lets the hub hold the connection open.
+- **Estimation enabled**: when on, estimates shade motion so `current_position` and `opening/closing` states are updated smoothly between hub reports.
+- **Estimated time to fully open (sec)**: time a shade typically takes to move from 0 → 100; used to scale the opening/closing duration and interpolate positions for partial moves.
 
 ## Installation
 

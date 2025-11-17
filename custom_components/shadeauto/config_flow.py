@@ -17,6 +17,8 @@ from .const import (
     DEFAULT_VERIFY_ENABLED,
     DEFAULT_VERIFY_DELAY,
     DEFAULT_NOTIFICATION_TIMEOUT,
+    DEFAULT_FULL_TRAVEL_TIME,
+    DEFAULT_ESTIMATION_ENABLED,
 )
 from .api import ShadeAutoApi
 
@@ -72,6 +74,12 @@ class ShadeAutoOptionsFlow(config_entries.OptionsFlow):
 
             vol.Optional("notification_timeout_sec", default=self.entry.options.get("notification_timeout_sec", DEFAULT_NOTIFICATION_TIMEOUT)): 
                 selector({"number":{"min":-1,"max":10,"step":1,"unit_of_measurement":"s"}}),
+
+            vol.Optional("estimation_enabled", default=self.entry.options.get("estimation_enabled", DEFAULT_ESTIMATION_ENABLED)):
+                selector({"boolean": {}}),
+
+            vol.Optional("full_travel_time_sec", default=self.entry.options.get("full_travel_time_sec", DEFAULT_FULL_TRAVEL_TIME)):
+                selector({"number": {"min": 5, "max": 120, "step": 1, "unit_of_measurement": "s"}}),
 
         })
         if user_input is not None:

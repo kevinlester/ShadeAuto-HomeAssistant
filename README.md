@@ -125,5 +125,5 @@ Create new feature requests via creating a new Github Issue in this repo.  Note 
 
 ## Credits & License
 - Community discoveries of the local endpoints inspired this integration.
-- MIT License. Add a `LICENSE` if you publish publicly.
+- MIT License
 

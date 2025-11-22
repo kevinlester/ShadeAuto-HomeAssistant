@@ -12,7 +12,7 @@ Control Norman **ShadeAuto** shades locally via the hub’s undocumented HTTP AP
   - One **Cover** entity per shade: open/close/**set position** (0–100).
   - One **Battery (%)** sensor per shade.
   - One **Low Battery (%)** flag per shade.
-- Works with **multiple hubs** (add each hub by IP).
+- Works with **multiple hubs** (add each hub by IP/Hostname).
 
 ## Entities per shade (unique device)
 - `cover.<shade>`: open/close/set position (0–100)

@@ -46,6 +46,14 @@ class ShadeAutoCover(CoordinatorEntity[ShadeAutoCoordinator], CoverEntity):
         self._entry = entry
         self._attr_name = name
 
+        # Enable tilt features if the hub reports MiddleRailPosition for this shade
+        if coordinator.peripherals.get(str(uid), {}).get("supports_tilt"):
+            self._attr_supported_features |= (
+                CoverEntityFeature.OPEN_TILT
+                | CoverEntityFeature.CLOSE_TILT
+                | CoverEntityFeature.SET_TILT_POSITION
+            )
+
         thing = coordinator.data.get("thing_name") or coordinator.api.host
         self._attr_unique_id = f"shadeauto_{thing}_{uid}"
 
@@ -287,27 +295,83 @@ class ShadeAutoCover(CoordinatorEntity[ShadeAutoCoordinator], CoverEntity):
 
     # --- commands ---
 
+    def _get_current_tilt(self) -> int | None:
+        """Get current tilt position for use in position commands."""
+        st = self._status_for_uid()
+        raw = st.get("MiddleRailPosition")
+        try:
+            return int(raw) if raw is not None else None
+        except (TypeError, ValueError):
+            return None
+
     async def async_set_cover_position(self, **kwargs) -> None:
         pos = int(kwargs["position"])
+        tilt = self._get_current_tilt()
         self._start_estimation_for_command(pos)
         self._start_animation()
         self.async_write_ha_state()
-        await self.coordinator.api.control(self._uid, bottom=pos)
+        await self.coordinator.api.control(self._uid, bottom=pos, middle=tilt)
         self.coordinator.register_command(self._uid, pos)
 
     async def async_open_cover(self, **kwargs) -> None:
         target = 100
+        tilt = self._get_current_tilt()
         self._start_estimation_for_command(target)
         self._start_animation()
         self.async_write_ha_state()
-        await self.coordinator.api.control(self._uid, bottom=target)
+        await self.coordinator.api.control(self._uid, bottom=target, middle=tilt)
         self.coordinator.register_command(self._uid, target)
 
     async def async_close_cover(self, **kwargs) -> None:
         target = 0
+        tilt = self._get_current_tilt()
         self._start_estimation_for_command(target)
         self._start_animation()
         self.async_write_ha_state()
-        await self.coordinator.api.control(self._uid, bottom=target)
+        await self.coordinator.api.control(self._uid, bottom=target, middle=tilt)
         self.coordinator.register_command(self._uid, target)
+
+    # --- tilt properties ---
+
+    @property
+    def current_cover_tilt_position(self) -> int | None:
+        """Return the current tilt position (0=left closed, 50=open, 100=right closed)."""
+        st = self._status_for_uid()
+        raw = st.get("MiddleRailPosition")
+        try:
+            return int(raw) if raw is not None else None
+        except (TypeError, ValueError):
+            return None
+
+    # --- tilt commands ---
+
+    def _get_current_bottom(self) -> int:
+        """Get current bottom position for use in tilt-only commands."""
+        try:
+            pos = self.coordinator.get_effective_position(self._uid)
+            if pos is not None:
+                return pos
+        except Exception:
+            pass
+        st = self._status_for_uid()
+        raw = st.get("BottomRailPosition")
+        try:
+            return int(raw) if raw is not None else 0
+        except (TypeError, ValueError):
+            return 0
+
+    async def async_set_cover_tilt_position(self, **kwargs) -> None:
+        """Set tilt position (0-100). Must send both bottom and middle to the hub."""
+        tilt = int(kwargs["tilt_position"])
+        bottom = self._get_current_bottom()
+        await self.coordinator.api.control(self._uid, bottom=bottom, middle=tilt)
+        await self.coordinator.async_request_refresh()
+
+    async def async_open_cover_tilt(self, **kwargs) -> None:
+        """Open tilt (flat/90 degrees to window = 50%)."""
+        await self.async_set_cover_tilt_position(tilt_position=50)
+
+    async def async_close_cover_tilt(self, **kwargs) -> None:
+        """Close tilt (fully closed = 0%)."""
+        await self.async_set_cover_tilt_position(tilt_position=0)
 

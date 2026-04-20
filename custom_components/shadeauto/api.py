@@ -110,13 +110,13 @@ class ShadeAutoApi:
         # millisecond-ish unique ID in signed 31-bit range
         return int(time.time() * 1000) & 0x7FFFFFFF
 
-    async def control(self, uid: int | str, *, bottom: int | None = None) -> dict:
-        """Move a shade. Positions are 0..100 (BottomRailPosition only)."""
+    async def control(self, uid: int | str, *, bottom: int | None = None, middle: int | None = None) -> dict:
+        """Move a shade. Positions are 0..100. Both BottomRailPosition and MiddleRailPosition must be sent together."""
         # Monotonic seconds: avoid identical Timestamps for back-to-back commands
         now = _now_ts()
         ts = now if now > self._last_ts else self._last_ts + 1
         self._last_ts = ts
-    
+
         payload: dict = {
             "PeripheralUID": int(uid) if str(uid).isdigit() else uid,
             "TaskID": self._task_id(),
@@ -126,7 +126,9 @@ class ShadeAutoApi:
             payload["ThingName"] = self.thing_name
         if bottom is not None:
             payload["BottomRailPosition"] = int(bottom)
-    
+        if middle is not None:
+            payload["MiddleRailPosition"] = int(middle)
+
         # keep current per-hub send spacing
         async with self._cmd_lock:
             from .const import DEFAULT_SEND_SPACING

@@ -69,6 +69,15 @@ class ShadeAutoCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
             }
             for p in per_list
         }
+        # Detect tilt support by checking if MiddleRailPosition is reported in status
+        try:
+            status = await self.api.status()
+            for item in status:
+                uid = str(item.get("PeripheralUID") or "")
+                if uid and uid in self._peripherals and "MiddleRailPosition" in item:
+                    self._peripherals[uid]["supports_tilt"] = True
+        except Exception:
+            _LOGGER.debug("Could not detect tilt support during first refresh")
         await super().async_config_entry_first_refresh()
 
     async def _async_update_data(self) -> Dict[str, Any]:
@@ -90,7 +99,7 @@ class ShadeAutoCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
             if not uid:
                 continue
             cur = by_uid.setdefault(uid, {})
-            for k in ("BottomRailPosition", "BatteryVoltage", "Name"):
+            for k in ("BottomRailPosition", "MiddleRailPosition", "BatteryVoltage", "Name"):
                 if k in item:
                     cur[k] = item[k]
 

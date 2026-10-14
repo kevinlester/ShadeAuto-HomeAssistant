@@ -19,6 +19,8 @@ from .const import (
     DEFAULT_NOTIFICATION_TIMEOUT,
     DEFAULT_FULL_TRAVEL_TIME,
     DEFAULT_ESTIMATION_ENABLED,
+    DEFAULT_COLLISION_GUARD,
+    DEFAULT_RAIL_MIN_GAP,
 )
 from .api import ShadeAutoApi
 
@@ -80,6 +82,12 @@ class ShadeAutoOptionsFlow(config_entries.OptionsFlow):
 
             vol.Optional("full_travel_time_sec", default=self.entry.options.get("full_travel_time_sec", DEFAULT_FULL_TRAVEL_TIME)):
                 selector({"number": {"min": 5, "max": 120, "step": 1, "unit_of_measurement": "s"}}),
+
+            vol.Optional("collision_guard", default=self.entry.options.get("collision_guard", DEFAULT_COLLISION_GUARD)):
+                selector({"boolean": {}}),
+
+            vol.Optional("rail_min_gap", default=self.entry.options.get("rail_min_gap", DEFAULT_RAIL_MIN_GAP)):
+                selector({"number": {"min": 0, "max": 50, "step": 1, "unit_of_measurement": "%"}}),
 
         })
         if user_input is not None:

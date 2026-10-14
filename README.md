@@ -10,14 +10,44 @@ Control Norman **ShadeAuto** shades locally via the hub’s undocumented HTTP AP
 - **Auto-discover shades** from any ShadeAuto hub(s).
 - One **Device** per discovered Shade
   - One **Cover** entity per shade: open/close/**set position** (0–100).
+  - **TDBU (top-down/bottom-up) shades** get a **second cover** for the top rail, controlled independently.
   - One **Battery (%)** sensor per shade.
   - One **Low Battery (%)** flag per shade.
 - Works with **multiple hubs** (add each hub by IP/Hostname).
 
 ## Entities per shade (unique device)
-- `cover.<shade>`: open/close/set position (0–100)
+- `cover.<shade>`: open/close/set position (0–100) — the bottom rail
+- `cover.<shade>_top`: the top rail, **TDBU shades only**
 - `sensor.<shade>_battery`: battery percent
 - `binary_sensor.<shade>_battery_low`: low-battery flag (threshold in Options)
+
+## TDBU (top-down/bottom-up) shades
+TDBU shades (hub `ModuleType` 33) have two independently-motorised rails. This build
+exposes each as its own cover: the original entity drives the bottom rail, and a second
+`… Top` entity drives the top (middle) rail. Single-rail shades are unaffected and keep
+their single cover and existing entity IDs.
+
+Both rail positions use the hub's height axis: **0% = fully lowered** and **100% =
+fully raised**. The top cover is no longer inverted in this update. Rail height does not
+by itself describe how much of the window is covered; that depends on both rails.
+
+The hub controls both rails together, so every TDBU move sends both rail positions,
+holding the rail you didn't touch in place whenever the destination permits it. A
+**collision guard** (on by default, Options) keeps the top rail at or above the bottom
+rail. If a requested destination needs more room, the companion moves just enough
+to permit it. For example, raising the bottom to 100% also raises a lowered top rail
+to 100%. With a nonzero minimum gap, the bottom's highest position is 100 minus the
+gap. Concurrent scene calls are serialized per shade, including retries.
+
+### Upgrading from earlier TDBU builds
+
+The old top cover mapped the hub's 35% height to 65% and sent a full-open command to
+the bottom of its travel. With this update, full-open presets should set **both covers to 100%**
+(or call `cover.open_cover` on both). Review saved top-rail positions: to preserve an
+old physical destination, replace an old numeric top position `p` with `100 - p`.
+Recapturing scenes at the desired physical position is another option. Entity IDs
+are unchanged. Once estimated travel finishes, the displayed position returns to
+the hub reading rather than remaining pinned to an old target.
 
 ## Notes
 - Battery source is the hub’s `BatteryVoltage`. If it’s 0–100, we use it as-is; if it’s volts, we map 3.30–4.20 V → 0–100%.
@@ -35,6 +65,8 @@ Control Norman **ShadeAuto** shades locally via the hub’s undocumented HTTP AP
 - **Notification timeout (sec)**: hold time for the hub’s long-poll `/notification` request; `-1` lets the hub hold the connection open.
 - **Estimation enabled**: when on, estimates shade motion so `current_position` and `opening/closing` states are updated smoothly between hub reports.
 - **Estimated time to fully open (sec)**: time a shade typically takes to move from 0 → 100; used to scale the opening/closing duration and interpolate positions for partial moves.
+- **TDBU: prevent the two rails from crossing**: collision guard for TDBU shades (default on).
+- **TDBU: minimum gap to keep between rails (%)**: extra separation the guard enforces (default 0).
 
 ## Installation
 
@@ -119,7 +151,10 @@ Create new feature requests via creating a new Github Issue in this repo.  Note 
   ```
 
 ## Limitations
-- No top/middle rail (TDBU) control in this build.
+- TDBU support is detected by hub `ModuleType` (33) and rides the same undocumented
+  endpoints; the control field/behaviour was reverse-engineered against real hardware
+  and may vary by firmware. It degrades to single-rail behaviour when the second rail
+  isn't present.
 - Battery is exposed as **%**; mapping from volts is a heuristic if hub returns volts.
 - API is not official; behavior may change with updates.
 

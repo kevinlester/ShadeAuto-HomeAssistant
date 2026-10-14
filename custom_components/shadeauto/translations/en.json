@@ -23,7 +23,9 @@
           "verify_delay_sec": "Seconds to wait before verifing shade is in desired position (and retrying if not)",
           "notification_timeout_sec": "Notification hold timeout (seconds; -1 for infinite)",
           "estimation_enabled": "Enable time-based position & state estimation",
-          "full_travel_time_sec": "Estimated time to fully open (seconds)"
+          "full_travel_time_sec": "Estimated time to fully open (seconds)",
+          "collision_guard": "TDBU: prevent the two rails from crossing",
+          "rail_min_gap": "TDBU: minimum gap to keep between rails (%)"
         }
       }
     }

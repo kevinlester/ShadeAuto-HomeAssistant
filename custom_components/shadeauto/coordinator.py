@@ -1,448 +1,736 @@
+"""Coordinator: fetches hub status and tracks commanded moves.
+
+The hub is the source of truth. It reports two axes per shade, the bottom
+rail and the middle rail (vane tilt on sheer shades, the second rail on
+two-rail shades); for each it gives an actual position and a target. Which
+axes are tracked depends on the shade's profile (:func:`shade_profile`):
+single-rail and unrecognised shades track the bottom rail only. A shade is
+*moving* while a tracked axis's target and actual differ. Our own commands
+are tracked as *pending* targets for a short grace period, until the hub's
+reported target reflects them; whether the hub ever did reflect a command is
+remembered per axis, because that is what later tells a lost command apart
+from a shade someone else re-commanded.
+
+Data flow: a cover entity calls :meth:`ShadeAutoCoordinator.register_command`,
+sends the command through :class:`ShadeAutoApi`, calls
+:meth:`ShadeAutoCoordinator.command_sent` once the post is answered and
+refreshes the coordinator (or calls :meth:`ShadeAutoCoordinator.discard_command`
+if the post failed). The post can wait several ``send_spacing_sec`` for its
+slot behind other shades' commands, so the grace for the hub to reflect a
+command and the verify delay both run from ``command_sent``, not from
+registration. While any tracked axis is *unsettled* (our command pending, or
+the hub's target away from its actual) the coordinator polls ``/status`` every
+``motion_poll_sec`` instead of ``poll_seconds``: the hub publishes only end
+states, and after a stop the hub reports where the shade ended only some 35 s
+later. When push updates are on, ``push.NotificationListener`` reads the hub's
+``/notification`` stream (docs/HUB_PROTOCOL.md 2.5) and requests a refresh
+for every change it announces; polling stays exactly as it is, as the
+fallback, because the stream does not replay what it missed while it was
+down. ``verify_delay_sec`` after the post the coordinator checks once that the
+shade reached its target on every axis the command set. If it did not, and
+nobody else has re-commanded the shade in the meantime, it first asks that
+one shade to report in (``StatusRequest``), because the hub's position may
+just be stale, and re-sends the command a single time only if the report
+still shows the shade short of its target.
+"""
+
 from __future__ import annotations
 
 import asyncio
-import json
+from collections.abc import Coroutine, Iterable, Iterator
+from contextlib import contextmanager
+from dataclasses import dataclass, field, replace
+from datetime import datetime, timedelta
 import logging
-import re
 import time
-from dataclasses import dataclass
-from datetime import timedelta
-from typing import Any, Dict, List
+from typing import Any
 
-from homeassistant.core import HomeAssistant
+from homeassistant.config_entries import ConfigEntry, ConfigEntryState
+from homeassistant.core import CALLBACK_TYPE, HomeAssistant, callback
+from homeassistant.helpers.debounce import Debouncer
+from homeassistant.helpers.event import async_call_later
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
-from .api import ShadeAutoApi
-from .const import DEFAULT_POLL, DEFAULT_NOTIFICATION_TIMEOUT, DEFAULT_VERIFY_ENABLED, DEFAULT_VERIFY_DELAY
+from .api import ShadeAutoApi, ShadeAutoError
+from .const import (
+    ATTR_BATTERY,
+    ATTR_BOTTOM_RAIL,
+    ATTR_MIDDLE_RAIL,
+    ATTR_PERIPHERAL_UID,
+    ATTR_TARGET_BOTTOM_RAIL,
+    ATTR_TARGET_MIDDLE_RAIL,
+    AXES,
+    AXIS_BOTTOM,
+    AXIS_FIELDS,
+    AXIS_MIDDLE,
+    DOMAIN,
+    KNOWN_UNSUPPORTED_MODULE_TYPES,
+    MOTION_FAILSAFE_SEC,
+    PENDING_GRACE_SEC,
+    POSITION_TOLERANCE,
+    PROFILE_AXES,
+    PROFILE_BY_MODULE,
+    PROFILE_BY_MODULE_TYPE,
+    PROFILE_LEGACY,
+    REFRESH_COOLDOWN_SEC,
+    STATUS_REPORT_WAIT_SEC,
+)
+from .options import ShadeAutoOptions
+from .util import to_int
 
 _LOGGER = logging.getLogger(__name__)
 
 
+async def async_wait(hass: HomeAssistant, seconds: float, until: asyncio.Future[None] | None = None) -> None:
+    """Wait ``seconds``, or less if ``until`` completes first.
+
+    The wait is an ``async_call_later`` timer rather than ``asyncio.sleep`` or
+    ``asyncio.timeout``: under the test harness's frozen clock those never
+    return, while a timer fires when a test advances time
+    (docs/ARCHITECTURE.md, Testing notes). Cancelling the caller cancels the
+    timer too.
+    """
+    waiter: asyncio.Future[None] = until if until is not None else hass.loop.create_future()
+
+    @callback
+    def _expire(_now: datetime) -> None:
+        if not waiter.done():
+            waiter.set_result(None)
+
+    cancel = async_call_later(hass, seconds, _expire)
+    try:
+        await waiter
+    finally:
+        cancel()
+
+
+# Fields copied from each /status record into the coordinator's data. The
+# module fields fill in a profile when /GetAllPeripheral lacks them; the
+# firmware field is for the device page.
+STATUS_FIELDS = (
+    ATTR_BOTTOM_RAIL,
+    ATTR_MIDDLE_RAIL,
+    ATTR_TARGET_BOTTOM_RAIL,
+    ATTR_TARGET_MIDDLE_RAIL,
+    ATTR_BATTERY,
+    "ModuleType",
+    "ModuleDetail",
+    "FirmwareVersion",
+)
+
+
+def shade_profile(module_type: int | None, module_detail: int | None) -> str:
+    """The profile (``PROFILE_*`` in ``const.py``) for a hub ``ModuleType``/``ModuleDetail`` pair.
+
+    Anything the tables do not cover is ``legacy``: lift only, as 0.3.0
+    handled every shade. That includes a missing ``ModuleDetail`` on a type
+    whose profile depends on the detail (32, 48, 49), because which of its
+    profiles applies cannot be told.
+    """
+    if module_type is None:
+        return PROFILE_LEGACY
+    if module_detail is None:
+        if any(known_type == module_type for known_type, _ in PROFILE_BY_MODULE):
+            return PROFILE_LEGACY
+    elif profile := PROFILE_BY_MODULE.get((module_type, module_detail)):
+        return profile
+    return PROFILE_BY_MODULE_TYPE.get(module_type, PROFILE_LEGACY)
+
+
+@dataclass(frozen=True, slots=True)
+class Peripheral:
+    """Static facts about one shade, from ``/GetAllPeripheral`` (module pair completed from ``/status``)."""
+
+    uid: str
+    name: str
+    module_type: int | None
+    module_detail: int | None
+
+    @property
+    def profile(self) -> str:
+        """How the shade is driven and tracked; see :func:`shade_profile`."""
+        return shade_profile(self.module_type, self.module_detail)
+
+    @classmethod
+    def from_hub(cls, record: dict[str, Any]) -> Peripheral:
+        uid = str(record.get(ATTR_PERIPHERAL_UID))
+        # PeripheralName is what the hub sends; Name is a fallback for hub firmware that might use it instead.
+        name = record.get("PeripheralName") or record.get("Name")
+        return cls(
+            uid=uid,
+            name=str(name) if name else f"Shade {uid}",
+            module_type=to_int(record.get("ModuleType")),
+            module_detail=to_int(record.get("ModuleDetail")),
+        )
+
+
 @dataclass
-class ShadeMotionState:
-    """Per-shade motion / verification state."""
-    last_hub_pos: int | None = None
-    pending_target: int | None = None
-    in_motion: bool = False
-    last_control_ts: float | None = None  # monotonic()
+class AxisState:
+    """What we know about one axis of one shade."""
+
+    actual: int | None = None  # last position the hub reported
+    target: int | None = None  # last target the hub reported
+    pending: int | None = None  # target we sent that the hub has not reflected yet
+    pending_ts: float | None = None  # monotonic time the pending target's post was answered; None while it is queued
+    changed_ts: float | None = None  # monotonic time actual/target last changed (or we sent a command)
+    reflected: bool = False  # the hub's target matched our last command at least once
+
+    def at(self, value: int) -> bool:
+        return self.actual is not None and abs(self.actual - value) <= POSITION_TOLERANCE
+
+
+@dataclass
+class ShadeState:
+    """Motion bookkeeping for one shade."""
+
+    axes: dict[str, AxisState] = field(default_factory=lambda: {axis: AxisState() for axis in AXES})
+    cmd_id: int | None = None  # newest command we sent, so stale verifies can bail
+    command: tuple[int, int | None] | None = None  # (bottom, middle) of that command, for its verify
     retry_attempted: bool = False
-    start_pos: int | None = None          # hub pos at time of last command
-    saw_move_since_cmd: bool = False      # have we seen a different pos since that command?
+    stopped_ts: float | None = None  # monotonic time of our last stop command
+    cancel_verify: CALLBACK_TYPE | None = None  # pending verify timer, if any
 
 
-class ShadeAutoCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
-    """Polls hub status and caches peripherals + latest state."""
+class ShadeAutoCoordinator(DataUpdateCoordinator[dict[str, Any]]):
+    """Polls the hub and keeps the per-shade status that entities render."""
 
-    def __init__(self, hass: HomeAssistant, api: ShadeAutoApi, poll_seconds: int) -> None:
+    config_entry: ConfigEntry
+
+    def __init__(self, hass: HomeAssistant, entry: ConfigEntry, api: ShadeAutoApi, options: ShadeAutoOptions) -> None:
+        # The push listener's refresh requests go through this (async_hub_changed);
+        # see REFRESH_COOLDOWN_SEC. The coordinator sets the debouncer's function itself.
+        debouncer: Debouncer[Coroutine[Any, Any, None]] = Debouncer(
+            hass, _LOGGER, cooldown=REFRESH_COOLDOWN_SEC, immediate=True
+        )
         super().__init__(
             hass,
             _LOGGER,
-            name="ShadeAuto Coordinator",
-            update_interval=timedelta(seconds=int(poll_seconds) if poll_seconds else DEFAULT_POLL),
+            config_entry=entry,
+            name=f"{DOMAIN} {api.host}",
+            update_interval=timedelta(seconds=options.poll_seconds),
+            request_refresh_debouncer=debouncer,
         )
         self.api = api
-        self._peripherals: Dict[str, Dict[str, Any]] = {}
+        self.options = options
+        self._refresh_debouncer = debouncer
+        # The change stream announced something that no /status read started since
+        # then has covered; see async_hub_changed.
+        self._change_unread = False
+        self._cancel_reread: CALLBACK_TYPE | None = None
+        self._shut_down = False  # a read that ends after unload must not schedule another
+        # Assigned by async_setup_entry in the package __init__.py once the hub device exists.
+        self.hub_device_id: str | None = None
+        # True while push.NotificationListener holds a stream the hub has acknowledged;
+        # for diagnostics and tests only.
+        self.push_connected = False
+        self.peripherals: dict[str, Peripheral] = {}
+        self._profiles_final = False  # set once the first /status has completed the module pairs
+        self._shades: dict[str, ShadeState] = {}
         self._cmd_seq = 0
-        self._last_cmd: Dict[str, Dict[str, Any]] = {}
-        # Motion / fake-position state
-        self._motion: dict[str, ShadeMotionState] = {}
-        # Long-poll state
-        self._notif_task: asyncio.Task | None = None
-        self._notif_ts: int = int(time.time())
-        self._last_global_control_ts: float | None = None
-        # ConfigEntry is wired in __init__.py
-        self.config_entry = None
+        self._idle_interval = timedelta(seconds=options.poll_seconds)
+        self._motion_interval = timedelta(seconds=options.motion_poll_sec)
+        # Verifies waiting for a shade to report in, by uid; see async_shades_reported.
+        self._report_waiters: dict[str, set[asyncio.Future[None]]] = {}
+
+    # --- lookups used by entities -------------------------------------------
 
     @property
-    def peripherals(self) -> Dict[str, Dict[str, Any]]:
-        return self._peripherals
+    def identity(self) -> str:
+        """Stable hub identity for unique IDs: its ThingName, else the host."""
+        return self.api.thing_name or self.api.host
 
-    async def async_config_entry_first_refresh(self) -> None:
-        await self.api.registration()
-        per_list = await self.api.get_all_peripheral()
-        self._peripherals = {
-            str(p.get("PeripheralUID")): {
-                "name": p.get("Name") or p.get("DisplayName") or f"Shade {p.get('PeripheralUID')}",
-                "room_id": p.get("RoomID"),
-                "module_type": p.get("ModuleType"),
-                "module_detail": p.get("ModuleDetail"),
-            }
-            for p in per_list
-        }
-        await super().async_config_entry_first_refresh()
+    def status_for(self, uid: str) -> dict[str, Any]:
+        """The most recent ``/status`` record for ``uid`` (empty if unknown)."""
+        status: dict[str, dict[str, Any]] = (self.data or {}).get("status", {})
+        return status.get(str(uid), {})
 
-    async def _async_update_data(self) -> Dict[str, Any]:
+    def _shade(self, uid: str) -> ShadeState:
+        return self._shades.setdefault(str(uid), ShadeState())
+
+    def axes_for(self, uid: str) -> tuple[str, ...]:
+        """The axes tracked for ``uid``: its profile's, or the bottom rail alone for a shade setup did not list."""
+        peripheral = self.peripherals.get(str(uid))
+        return PROFILE_AXES[peripheral.profile if peripheral is not None else PROFILE_LEGACY]
+
+    def _axis(self, uid: str, axis: str) -> AxisState:
+        return self._shade(uid).axes[axis]
+
+    def get_position(self, uid: str, axis: str) -> int | None:
+        """The hub's last reported position on ``axis``."""
+        return self._axis(uid, axis).actual
+
+    def get_target(self, uid: str, axis: str) -> int | None:
+        """Where ``axis`` is heading: our pending target, else the hub's target."""
+        state = self._axis(uid, axis)
+        return state.pending if state.pending is not None else state.target
+
+    def get_held_position(self, uid: str, axis: str) -> int | None:
+        """Where ``axis`` will come to rest if no new command moves it, or ``None`` if that is not known.
+
+        For commands that must restate a rail they do not move (the hub sets
+        every rail a command leaves out). That is our pending target, else the
+        hub's target, else its actual position. After our stop it is unknown
+        until the hub reports where the axis stopped: the hub keeps the
+        abandoned target until then (about 35 s, log C4b), and restating it
+        would restart the move the stop ended. kedube/ha-norman saw exactly
+        that on a two-rail shade (docs/NORMAN_API.md, ``/control``).
+        """
+        shade = self._shade(uid)
+        state = shade.axes[axis]
+        if state.pending is not None:
+            return state.pending
+        if self._stopped_since_last_change(shade, state) and self._unsettled(uid, axis):
+            return None
+        return state.target if state.target is not None else state.actual
+
+    @staticmethod
+    def _stopped_since_last_change(shade: ShadeState, state: AxisState) -> bool:
+        """True while the hub has reported nothing new for this axis since our stop."""
+        return shade.stopped_ts is not None and (state.changed_ts is None or state.changed_ts <= shade.stopped_ts)
+
+    def _unsettled(self, uid: str, axis: str) -> bool:
+        """True while the hub still owes an end state for ``axis``.
+
+        That is: our command is pending, or the hub's target differs from its
+        actual position and the shade has not stalled. Unlike :meth:`is_moving`
+        this ignores our own stop command, because the hub keeps the old target
+        until it reports the stop point some 35 s later, and we must keep
+        polling fast to see it.
+        """
+        state = self._axis(uid, axis)
+        if state.pending is not None:
+            return True
+        if state.actual is None or state.target is None:
+            return False
+        if abs(state.target - state.actual) <= POSITION_TOLERANCE:
+            return False
+        # Nothing changing for a long time means a stalled or unreachable shade, not a move.
+        stalled = state.changed_ts is not None and time.monotonic() - state.changed_ts > MOTION_FAILSAFE_SEC
+        return not stalled
+
+    def _any_unsettled(self) -> bool:
+        return any(self._unsettled(uid, axis) for uid in self._shades for axis in self.axes_for(uid))
+
+    def is_moving(self, uid: str, axis: str) -> bool:
+        """True while the hub's target differs from its actual position (or our command is pending).
+
+        Drives the entity's opening/closing flags, so a shade we just stopped
+        counts as not moving even though the hub still shows the old target.
+        """
+        shade = self._shade(uid)
+        state = shade.axes[axis]
+        if state.pending is not None:
+            return True
+        if self._stopped_since_last_change(shade, state):
+            # We stopped it; the hub re-targets to the stopped position only after a delay.
+            return False
+        return self._unsettled(uid, axis)
+
+    def is_shade_moving(self, uid: str) -> bool:
+        return any(self.is_moving(uid, axis) for axis in self.axes_for(uid))
+
+    def any_moving(self) -> bool:
+        return any(self.is_shade_moving(uid) for uid in self._shades)
+
+    # --- polling --------------------------------------------------------------
+
+    async def _async_setup(self) -> None:
+        """Register with the hub and fetch the shade list, once, before the first refresh.
+
+        Raising ``UpdateFailed`` here makes the base class turn the failure
+        into ``ConfigEntryNotReady``, so an unreachable hub puts the entry into
+        setup retry instead of error.
+        """
+        try:
+            await self.api.registration()
+            records = await self.api.get_all_peripheral()
+        except ShadeAutoError as err:
+            raise UpdateFailed(f"Cannot reach ShadeAuto hub at {self.api.host}: {err}") from err
+        self.peripherals = {p.uid: p for p in map(Peripheral.from_hub, records)}
+
+    def _finalise_profiles(self, status: list[dict[str, Any]]) -> None:
+        """Complete each shade's module pair from its first ``/status`` record, then fix its profile.
+
+        Runs once, on the refresh that ends setup: the platforms create their
+        entities from the profiles right after it, so a profile must not change
+        later. Shades left on the legacy profile are logged here, once per
+        setup: a warning for a pair nobody has reported yet, a debug line for
+        the families the vendor app knows but this integration does not drive.
+        """
+        records = {str(item.get(ATTR_PERIPHERAL_UID)): item for item in status}
+        for uid, peripheral in self.peripherals.items():
+            record = records.get(uid, {})
+            if peripheral.module_type is None:
+                peripheral = replace(peripheral, module_type=to_int(record.get("ModuleType")))
+            if peripheral.module_detail is None:
+                peripheral = replace(peripheral, module_detail=to_int(record.get("ModuleDetail")))
+            self.peripherals[uid] = peripheral
+        self._profiles_final = True
+
+        unrecognised: dict[tuple[int | None, int | None], list[str]] = {}
+        for peripheral in self.peripherals.values():
+            if peripheral.profile == PROFILE_LEGACY:
+                unrecognised.setdefault((peripheral.module_type, peripheral.module_detail), []).append(peripheral.name)
+        for (module_type, module_detail), names in unrecognised.items():
+            family = KNOWN_UNSUPPORTED_MODULE_TYPES.get(module_type) if module_type is not None else None
+            if family is not None:
+                _LOGGER.debug(
+                    "%s (%s, ModuleType %s / ModuleDetail %s) has no verified behaviour; handled as a lift-only shade",
+                    ", ".join(names),
+                    family,
+                    module_type,
+                    module_detail,
+                )
+                continue
+            _LOGGER.warning(
+                "ModuleType %s / ModuleDetail %s, reported for shade %s, is not a shade type this integration "
+                "recognises, so it is handled as a lift-only shade. Please report the pair and the shade's "
+                "product name in a GitHub issue so it can be supported",
+                module_type,
+                module_detail,
+                ", ".join(names),
+            )
+
+    async def async_shutdown(self) -> None:
+        for shade in self._shades.values():
+            self._cancel_verify(shade)
+        self._shut_down = True
+        if self._cancel_reread is not None:
+            self._cancel_reread()
+            self._cancel_reread = None
+        await super().async_shutdown()
+
+    async def _async_update_data(self) -> dict[str, Any]:
+        self._change_unread = False  # this read covers every change announced so far
         try:
             status = await self.api.status()
-        except Exception as err:  # pragma: no cover - transport errors are logged by HA
+        except ShadeAutoError as err:
             raise UpdateFailed(f"status error: {err}") from err
+        finally:
+            self._reread_if_changed()
+        if not self._profiles_final:
+            self._finalise_profiles(status)
+        data = {"status": self._build_status_by_uid(status)}
+        self._apply_poll_interval()
+        return data
 
-        by_uid = self._build_status_by_uid(status)
-        return {"thing_name": self.api.thing_name, "peripherals": self._peripherals, "status": by_uid}
-
-    # --- motion helpers ---
-
-    def _build_status_by_uid(self, status: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
-        """Normalise hub status list into a dict keyed by UID and update motion state."""
-        by_uid: Dict[str, Dict[str, Any]] = {}
+    def _build_status_by_uid(self, status: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+        """Key the hub's status list by UID and feed positions into motion tracking."""
+        by_uid: dict[str, dict[str, Any]] = {}
         for item in status:
-            uid = str(item.get("PeripheralUID") or "")
+            uid = str(item.get(ATTR_PERIPHERAL_UID) or "")
             if not uid:
                 continue
-            cur = by_uid.setdefault(uid, {})
-            for k in ("BottomRailPosition", "BatteryVoltage", "Name"):
-                if k in item:
-                    cur[k] = item[k]
-
-            state = self._motion.setdefault(uid, ShadeMotionState())
-            pos = cur.get("BottomRailPosition")
-            try:
-                pos_i = int(pos) if pos is not None else None
-            except (TypeError, ValueError):
-                pos_i = None
-            state = getattr(self, "_motion", {}).get(uid)
-            _LOGGER.debug(
-                "pos_debug: status uid=%s raw=%s pos_i=%s state_exists=%s in_motion=%s pending=%s last_hub_pos=%s",
-                uid,
-                pos,
-                pos_i,
-                state is not None,
-                getattr(state, "in_motion", None),
-                getattr(state, "pending_target", None),
-                getattr(state, "last_hub_pos", None),
-            )
-            state.last_hub_pos = pos_i
-
-            # If we have a baseline for this command and we've seen a different pos,
-            # remember that we've observed actual motion since the command started.
-            if (
-                state.start_pos is not None
-                and pos_i is not None
-                and abs(pos_i - state.start_pos) > 2
-            ):
-                state.saw_move_since_cmd = True
-
-            if state.in_motion and state.pending_target is not None and pos_i is not None:
-                if abs(pos_i - state.pending_target) <= 2 and state.saw_move_since_cmd:
-                    self.logger.debug(
-                        "motion: UID %s hub pos %s ≈ target %s → settled",
-                        uid,
-                        pos_i,
-                        state.pending_target,
-                    )
-                    state.in_motion = False
-                    state.pending_target = None
-
+            record = by_uid.setdefault(uid, {})
+            for key in STATUS_FIELDS:
+                if key in item:
+                    record[key] = item[key]
+            for axis in self.axes_for(uid):
+                actual_key, target_key = AXIS_FIELDS[axis]
+                self._update_axis(uid, axis, to_int(record.get(actual_key)), to_int(record.get(target_key)))
         return by_uid
 
-    def _pending_uids(self) -> list[str]:
-        """Return UIDs that we still consider in-motion."""
-        return [uid for uid, st in self._motion.items() if st.in_motion and st.pending_target is not None]
+    def _update_axis(self, uid: str, axis: str, actual: int | None, target: int | None) -> None:
+        """Record what the hub reports for one axis and reconcile it with our pending command."""
+        state = self._axis(uid, axis)
+        now = time.monotonic()
+        if actual != state.actual or target != state.target:
+            state.changed_ts = now
+        state.actual, state.target = actual, target
+        if state.pending is None:
+            return
+        if target == state.pending:
+            state.pending = None  # the hub accepted our command
+            state.reflected = True
+        elif state.pending_ts is not None and now - state.pending_ts > PENDING_GRACE_SEC:
+            _LOGGER.debug("UID %s %s: hub never reflected target %s; dropping pending", uid, axis, state.pending)
+            state.pending = None
 
-    def _prune_pending_with_cache(self) -> bool:
-        """Use cached status to mark shades as done if they already reached their target.
+    def _apply_poll_interval(self) -> None:
+        """Poll fast while any axis is unsettled, slowly otherwise."""
+        wanted = self._motion_interval if self._any_unsettled() else self._idle_interval
+        if self.update_interval != wanted:
+            _LOGGER.debug("Poll interval -> %ss", wanted.total_seconds())
+            self.update_interval = wanted
 
-        Returns True if nothing remains pending.
+    # --- push -----------------------------------------------------------------
+
+    @callback
+    def async_hub_changed(self) -> None:
+        """Read ``/status`` soon: the change stream announced a change, or was just (re)opened.
+
+        Called by ``push.NotificationListener``. The request goes through the
+        refresh debouncer (``REFRESH_COOLDOWN_SEC``) and is not awaited, so
+        the listener closing a stream cannot cancel the read. A change
+        announced while a read is in flight may have come after the hub
+        answered that read; :meth:`_reread_if_changed` then makes sure one
+        more read follows within ``REFRESH_COOLDOWN_SEC`` of it ending, which
+        the debouncer alone does not do on every supported Home Assistant
+        release (2025.8 drops a request made while its read runs).
         """
-        pending = self._pending_uids()
-        if not self._peripherals or not pending:
-            return not pending
+        self._change_unread = True
+        self._refresh_debouncer.async_schedule_call()
 
-        st = (self.data or {}).get("status", {}) or {}
-        for uid in list(pending):
-            cur = st.get(str(uid), {})
-            pos = cur.get("BottomRailPosition")
-            try:
-                pos_i = int(pos) if pos is not None else None
-            except (TypeError, ValueError):
-                pos_i = None
+    def _reread_if_changed(self) -> None:
+        """After a ``/status`` read: if a change was announced while it was in flight, read again after the cooldown."""
+        if self._shut_down or not self._change_unread or self._cancel_reread is not None:
+            return
 
-            state = self._motion.setdefault(uid, ShadeMotionState())
-            if pos_i is not None:
-                state.last_hub_pos = pos_i
-                if state.pending_target is not None and abs(pos_i - state.pending_target) <= 2 and state.saw_move_since_cmd:
-                    self.logger.debug(
-                        "cache prune: UID %s pos %s ≈ target %s → settled",
-                        uid,
-                        pos_i,
-                        state.pending_target,
-                    )
-                    state.in_motion = False
-                    state.pending_target = None
+        @callback
+        def _reread(_now: datetime) -> None:
+            self._cancel_reread = None
+            if self._change_unread:  # nothing has read /status since
+                self._refresh_debouncer.async_schedule_call()
 
-        return not self._pending_uids()
+        self._cancel_reread = async_call_later(self.hass, REFRESH_COOLDOWN_SEC, _reread)
 
-    def get_effective_position(self, uid: str) -> int | None:
-        uid = str(uid)
-        state = getattr(self, "_motion", {}).get(uid)
-        raw = None
-        # Try to read the cached hub value for debug purposes
+    @callback
+    def async_shades_reported(self, uids: Iterable[str]) -> None:
+        """Note that the hub's change stream named ``uids``; wakes the verifies waiting for them to report in.
+
+        Called by ``push.NotificationListener`` before it requests the refresh
+        that reads what changed.
+        """
+        for uid in uids:
+            for waiter in self._report_waiters.get(str(uid), ()):
+                if not waiter.done():
+                    waiter.set_result(None)
+
+    @contextmanager
+    def _report_watch(self, uid: str) -> Iterator[asyncio.Future[None]]:
+        """A future that completes when the change stream next names ``uid``.
+
+        Set up before the ``StatusRequest`` is sent, so an event that arrives
+        while the request is still being answered is not missed. Without the
+        stream nothing completes it, and the caller's wait simply runs out.
+        """
+        waiter: asyncio.Future[None] = self.hass.loop.create_future()
+        waiters = self._report_waiters.setdefault(uid, set())
+        waiters.add(waiter)
         try:
-            raw = (self.data or {}).get("status", {}).get(uid, {}).get("BottomRailPosition")
-        except Exception:
-            pass
+            yield waiter
+        finally:
+            waiters.discard(waiter)
+            if not waiters:
+                self._report_waiters.pop(uid, None)
 
-        if state and state.in_motion and state.pending_target is not None:
-            _LOGGER.debug(
-                "pos_debug: get_effective_position uid=%s -> pending=%s (in_motion=True, last_hub_pos=%s, raw=%s)",
-                uid,
-                state.pending_target,
-                getattr(state, "last_hub_pos", None),
-                raw,
-            )
-            return state.pending_target
+    # --- commands -------------------------------------------------------------
 
-        if state and state.last_hub_pos is not None:
-            _LOGGER.debug(
-                "pos_debug: get_effective_position uid=%s -> last_hub_pos=%s (in_motion=%s, pending=%s, raw=%s)",
-                uid,
-                state.last_hub_pos,
-                getattr(state, "in_motion", None),
-                getattr(state, "pending_target", None),
-                raw,
-            )
-            return state.last_hub_pos
+    def register_command(self, uid: str, *, bottom: int, middle: int | None) -> int:
+        """Record a move we are about to send; returns its command id.
+
+        Call it before the ``/control`` post so the pending target covers the
+        wait for the send slot and the post itself. Once the post is answered,
+        hand the returned id to :meth:`command_sent` and refresh the
+        coordinator so the next poll sees the hub's new target; if the post
+        fails, hand it to :meth:`discard_command` instead. Pass exactly the
+        fields the post carries: a command with ``middle`` sets both targets
+        on the hub (the entity resolves the vane or rail value first), and
+        ``middle=None`` is the bottom-only command of a shade whose middle
+        axis is not tracked.
+        """
+        uid = str(uid)
+        shade = self._shade(uid)
+        self._cmd_seq += 1
+        cmd_id = shade.cmd_id = self._cmd_seq
+        shade.retry_attempted = False
+        shade.stopped_ts = None
+        bottom = int(bottom)
+        middle = None if middle is None else int(middle)
+        shade.command = (bottom, middle)
+        self._set_pending(shade, bottom=bottom, middle=middle, sent=False)
+        self._cancel_verify(shade)
+        self._apply_poll_interval()
+        return cmd_id
+
+    def command_sent(self, uid: str, cmd_id: int) -> None:
+        """Start the clocks of a registered command whose ``/control`` post the hub has answered.
+
+        The grace for the hub to reflect the command (``PENDING_GRACE_SEC``)
+        and the verify delay run from here, not from :meth:`register_command`:
+        the API sends one command at a time, ``send_spacing_sec`` apart, so a
+        command in a scene can wait longer than the grace for its slot (eight
+        shades at the default 1.5 s, five at the 3 s maximum), and timing it
+        from registration would drop its pending target before it was even
+        sent. A no-op unless ``cmd_id`` is still the shade's newest command.
+        """
+        uid = str(uid)
+        shade = self._shade(uid)
+        if shade.cmd_id != cmd_id or shade.command is None:
+            return
+        now = time.monotonic()
+        for state in shade.axes.values():
+            if state.pending is not None:
+                state.pending_ts = now
+        bottom, middle = shade.command
+        if self.options.verify_enabled and self.options.verify_delay_sec > 0:
+
+            @callback
+            def _start_verify(_now: datetime) -> None:
+                shade.cancel_verify = None
+                if self.config_entry.state is not ConfigEntryState.LOADED:
+                    return
+                # As an entry background task the verify dies with the entry
+                # instead of posting to the hub from a half-unloaded integration.
+                self.config_entry.async_create_background_task(
+                    self.hass,
+                    self.async_verify_and_retry(uid, bottom=bottom, middle=middle, cmd_id=cmd_id),
+                    name=f"{DOMAIN} verify {uid}",
+                )
+
+            shade.cancel_verify = async_call_later(self.hass, self.options.verify_delay_sec, _start_verify)
+
+    def discard_command(self, uid: str, cmd_id: int) -> None:
+        """Forget a registered command that never reached the hub.
+
+        Acts only while ``cmd_id`` is still the shade's newest command: clears
+        the pending targets on both axes, cancels the verify timer, bumps the
+        command id so nothing stale can fire, and re-applies the poll
+        interval. A no-op for any older id.
+        """
+        shade = self._shade(uid)
+        if shade.cmd_id != cmd_id:
+            return
+        self._cmd_seq += 1
+        shade.cmd_id = self._cmd_seq
+        for state in shade.axes.values():
+            state.pending = None
+        self._cancel_verify(shade)
+        self._apply_poll_interval()
+
+    def register_stop(self, uid: str) -> None:
+        """Record that we told ``uid`` to stop; cancels any pending verify."""
+        shade = self._shade(uid)
+        self._cmd_seq += 1
+        shade.cmd_id = self._cmd_seq
+        shade.stopped_ts = time.monotonic()
+        for state in shade.axes.values():
+            state.pending = None
+        self._cancel_verify(shade)
+        self._apply_poll_interval()
+
+    @staticmethod
+    def _set_pending(shade: ShadeState, *, bottom: int, middle: int | None, sent: bool) -> None:
+        """Mark the command's targets pending; the grace starts now if its post has already been answered."""
+        now = time.monotonic()
+        for axis, value in ((AXIS_BOTTOM, bottom), (AXIS_MIDDLE, middle)):
+            if value is None:
+                continue
+            state = shade.axes[axis]
+            state.pending = value
+            state.pending_ts = now if sent else None
+            state.changed_ts = now
+            state.reflected = False
+
+    @staticmethod
+    def _cancel_verify(shade: ShadeState) -> None:
+        if shade.cancel_verify is not None:
+            shade.cancel_verify()
+            shade.cancel_verify = None
+
+    def _needs_retry(
+        self, uid: str, wanted: dict[str, int], *, targets_asked: dict[str, int | None] | None = None
+    ) -> bool:
+        """Whether a command that set ``wanted`` (axis -> target) should be sent again.
+
+        No if the hub reports the shade there on every axis, or if the hub's
+        target on one of those axes has moved away from ours after once
+        reflecting it (the app or a remote re-commanded the shade, or the hub
+        rewrote the target itself, and fighting that would be wrong). A target
+        the hub never reflected means the command was lost, which is exactly
+        what the retry is for.
+
+        ``targets_asked`` is the hub's target per axis when the shade was asked
+        to report in. kedube/ha-norman reports that a report-in sets the hub's
+        target to the shade's position (docs/HUB_PROTOCOL.md 4.6), so a target
+        that was ours then and now equals the position just reported is that
+        rewrite, not someone else's command: the shade is still short of ours,
+        and the command is re-sent, as 0.5.0 did without the report-in.
+        """
+        shade = self._shade(uid)
+        # An axis the hub does not report (actual None) cannot fail to arrive.
+        if all(shade.axes[axis].actual is None or shade.axes[axis].at(value) for axis, value in wanted.items()):
+            return False
+        for axis, value in wanted.items():
+            state = shade.axes[axis]
+            if not state.reflected or state.target is None or state.target == value:
+                continue
+            if targets_asked is not None and targets_asked.get(axis) == value and state.target == state.actual:
+                _LOGGER.debug(
+                    "UID %s %s: the report-in set the hub's target to the position %s; still retrying",
+                    uid,
+                    axis,
+                    state.target,
+                )
+                continue
+            _LOGGER.debug("UID %s %s: target changed to %s by someone else; not retrying", uid, axis, state.target)
+            return False
+        return True
+
+    async def async_verify_and_retry(self, uid: str, *, bottom: int, middle: int | None, cmd_id: int) -> None:
+        """Resend the command once if the shade is not where we asked.
+
+        Runs ``verify_delay_sec`` after a command's post was answered and
+        checks the axes the command set (``middle=None``: the bottom rail
+        only) with :meth:`_needs_retry`. Before re-sending, it asks that one
+        shade to report in (``StatusRequest``, never more than one per verify)
+        and waits until the change stream names the shade or
+        ``STATUS_REPORT_WAIT_SEC`` passes, then reads ``/status`` and decides
+        again by the same rules: the hub's position may only have been stale.
+        A target the report-in itself set to the shade's position does not
+        count as someone else's command (``targets_asked`` in
+        :meth:`_needs_retry`). A failed ``StatusRequest`` leaves the first
+        decision standing. Does
+        nothing once a newer command, a stop or an unload has superseded the
+        command, which is checked after every wait.
+        """
+        uid = str(uid)
+        shade = self._shade(uid)
+        if shade.cmd_id != cmd_id or shade.retry_attempted:
+            return
+        await self.async_refresh()
+        wanted = {AXIS_BOTTOM: int(bottom)}
+        if middle is not None:
+            wanted[AXIS_MIDDLE] = int(middle)
+        if shade.cmd_id != cmd_id or not self._needs_retry(uid, wanted):
+            return
+
+        # The hub can miss a shade's end-of-move report and keep an old
+        # position (docs/HUB_PROTOCOL.md 4.6); ask the shade itself first.
+        targets_asked = {axis: shade.axes[axis].target for axis in wanted}
+        with self._report_watch(uid) as reported:
+            try:
+                await self.api.request_status(uid)
+            except ShadeAutoError as err:
+                _LOGGER.debug("UID %s: status request failed (%s); deciding on the last status", uid, err)
+            else:
+                if shade.cmd_id != cmd_id:
+                    return
+                await async_wait(self.hass, STATUS_REPORT_WAIT_SEC, until=reported)
+                if shade.cmd_id != cmd_id:
+                    return
+                await self.async_refresh()
+                if shade.cmd_id != cmd_id or not self._needs_retry(uid, wanted, targets_asked=targets_asked):
+                    return
+        if shade.cmd_id != cmd_id:
+            return  # superseded while a failed status request waited for its send slot
 
         _LOGGER.debug(
-            "pos_debug: get_effective_position uid=%s -> raw=%s (no state or no motion)",
+            "UID %s not at bottom=%s middle=%s (hub reports %s/%s); retrying once",
             uid,
-            raw,
+            bottom,
+            middle,
+            shade.axes[AXIS_BOTTOM].actual,
+            shade.axes[AXIS_MIDDLE].actual,
         )
+        shade.retry_attempted = True
         try:
-            return int(raw) if raw is not None else None
-        except (TypeError, ValueError):
-            return None
-
-
-    # --- command / verify / long-poll ---
-
-    def register_command(self, uid: str, target: int) -> int:
-        """Record latest command for a shade and start watcher + verify timer."""
-        uid_s = str(uid)
-        self._cmd_seq += 1
-        cid = self._cmd_seq
-        now = time.monotonic()
-        target_i = int(target)
-        self._last_cmd[uid_s] = {"id": cid, "target": target_i, "t": now}
-
-        state = self._motion.get(uid_s)
-        if state is None:
-            state = self._motion[uid_s] = ShadeMotionState()
-
-        # Baseline for this command: where did the hub think we were when we started?
-        state.start_pos = state.last_hub_pos
-        state.saw_move_since_cmd = False
-        
-        state.in_motion = True
-        state.pending_target = target_i
-        state.last_control_ts = now
-        state.retry_attempted = False
-        self._last_global_control_ts = now
-
-        # Start long-poll watcher once per hub
-        if self._notif_task is None or self._notif_task.done():
-            self._notif_task = self.hass.async_create_task(self._notification_watch())
-
-        # Schedule verify/retry if enabled
-        ce = getattr(self, "config_entry", None)
-        verify_enabled = DEFAULT_VERIFY_ENABLED
-        verify_delay = DEFAULT_VERIFY_DELAY
-        try:
-            if ce is not None:
-                opts = ce.options
-                verify_enabled = bool(opts.get("verify_enabled", DEFAULT_VERIFY_ENABLED))
-                verify_delay = float(opts.get("verify_delay_sec", DEFAULT_VERIFY_DELAY))
-        except Exception:
-            pass
-
-        if verify_enabled and verify_delay > 0:
-            self.hass.async_create_task(
-                self.async_verify_and_retry(uid_s, target_i, delay=verify_delay, cmd_id=cid)
-            )
-
-        return cid
-
-    async def _notification_watch(self) -> None:
-        """Run long-poll cycles until all moving shades reach their targets or timeout."""
-        try:
-            spacing = getattr(self.api, "send_spacing_sec", 0.5)
-            # Small arming delay so both /control posts go out before any status read
-            await asyncio.sleep(float(spacing) + 0.2)
-
-            while self._pending_uids():
-                # 2-minute failsafe from last control
-                now_mono = time.monotonic()
-                if (
-                    self._last_global_control_ts is not None
-                    and now_mono - self._last_global_control_ts > 120.0
-                ):
-                    self.logger.warning(
-                        "long-poll: >120s since last control; clearing motion state and stopping watcher"
-                    )
-                    for st in self._motion.values():
-                        if st.in_motion:
-                            st.in_motion = False
-                            st.pending_target = None
-                    # Force a fresh status so UI matches the hub
-                    await self.async_request_refresh()
-                    break
-
-                # If the cached status already shows we're done (e.g. due to base 30s poll), exit.
-                if self._prune_pending_with_cache():
-                    self.logger.debug("long-poll: pending cleared per cached status, stopping")
-                    break
-
-                ce = getattr(self, "config_entry", None)
-                try:
-                    timeout = float(
-                        ce.options.get("notification_timeout_sec", DEFAULT_NOTIFICATION_TIMEOUT)
-                    ) if ce else float(DEFAULT_NOTIFICATION_TIMEOUT)
-                except Exception:
-                    timeout = float(DEFAULT_NOTIFICATION_TIMEOUT)
-
-                # Make sure our watermark doesn’t go backwards
-                now_s = int(time.time())
-                if self._notif_ts < now_s - 1:
-                    self._notif_ts = now_s
-
-                self.logger.debug("long-poll: hold %.2fs from ts=%s", timeout, self._notif_ts)
-
-                try:
-                    raw = await self.api.notification(timestamp=self._notif_ts, timeout=timeout)
-                except asyncio.CancelledError:
-                    raise
-                except Exception:
-                    self.logger.exception(
-                        "long-poll: notification() failed; will retry while any shade is pending"
-                    )
-                    await asyncio.sleep(1.0)
-                    continue
-
-                if isinstance(raw, str) and raw.strip():
-                    text = raw.strip()
-                    for chunk in re.split(r"}\s*{", text):
-                        if not chunk:
-                            continue
-                        if not chunk.startswith("{"):
-                            chunk = "{" + chunk
-                        if not chunk.endswith("}"):
-                            chunk = chunk + "}"
-                        try:
-                            obj = json.loads(chunk)
-                        except Exception:
-                            continue
-
-                        # advance watermark
-                        ts_val = obj.get("Status") or obj.get("Timestamp")
-                        if isinstance(ts_val, (int, float)):
-                            if ts_val > 10_000_000_000:
-                                ts_val = int(ts_val / 1000)
-                            self._notif_ts = int(ts_val)
-
-                        # handle events
-                        plist = obj.get("PeripheralList")
-                        if isinstance(plist, list) and plist:
-                            pending = set(self._pending_uids())
-                            if any(str(uid) in pending for uid in plist):
-                                # Reread full status and update cache + motion state
-                                status = await self.api.status()
-                                by_uid = self._build_status_by_uid(status)
-                                # Push into coordinator data for immediate UI update
-                                current = dict(self.data or {})
-                                current.setdefault("thing_name", self.api.thing_name)
-                                current.setdefault("peripherals", self._peripherals)
-                                current["status"] = by_uid
-                                self.async_set_updated_data(current)
-                # Normal: loop again until pending clears or failsafe fires
-
-            self.logger.info("long-poll: all commanded shades settled; stopping watcher")
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            self.logger.exception("long-poll watcher error")
-        finally:
-            self._notif_task = None
-
-    async def async_verify_and_retry(
-        self,
-        uid: str,
-        target: int,
-        *,
-        prev: int | None = None,
-        moved_threshold: int = 1,
-        delay: float = 20.0,
-        cmd_id: int | None = None,
-    ) -> None:
-        """Retry once only if this command is still latest and shade isn't at target."""
-        uid_s = str(uid)
-        latest = self._last_cmd.get(uid_s)
-        if cmd_id is not None and (latest is None or latest.get("id") != cmd_id):
+            await self.api.control(uid, bottom=bottom, middle=middle)
+        except ShadeAutoError as err:
+            _LOGGER.warning("Retry for UID %s failed: %s", uid, err)
             return
-
-        await asyncio.sleep(max(0.1, delay))
-
-        latest = self._last_cmd.get(uid_s)
-        if cmd_id is not None and (latest is None or latest.get("id") != cmd_id):
-            return
-
-        # Quick check from motion state first
-        state = self._motion.get(uid_s)
-        if state and state.pending_target is not None and state.last_hub_pos is not None:
-            if abs(state.last_hub_pos - state.pending_target) <= 2:
-                return
-
-        # Fallback to cached status for the UID
-        await self.async_request_refresh()
-        st = (self.data or {}).get("status", {}).get(uid_s, {})
-        pos_raw = st.get("BottomRailPosition")
-        try:
-            pos = int(pos_raw) if pos_raw is not None else None
-        except (TypeError, ValueError):
-            pos = None
-            state = getattr(self, "_motion", {}).get(uid_s)
-            _LOGGER.debug(
-                "pos_debug_1: verify uid=%s state_before_retry in_motion=%s pending=%s last_hub_pos=%s",
-                uid_s,
-                getattr(state, "in_motion", None),
-                getattr(state, "pending_target", None),
-                getattr(state, "last_hub_pos", None),
-            )
-        if (pos is None or abs(pos - int(target)) > 2) and latest and latest.get("id") == cmd_id:
-            self.logger.debug(
-                "verify_and_retry: UID %s not at target after %.1fs (pos=%s, want=%s) -> retry",
-                uid_s,
-                delay,
-                pos,
-                target,
-            )
-            # Mark as retried and send one more control
-            state = self._motion.setdefault(uid_s, ShadeMotionState())
-            state2 = getattr(self, "_motion", {}).get(uid_s)
-            _LOGGER.debug(
-                "pos_debug_2: verify uid=%s state_before_retry in_motion=%s pending=%s last_hub_pos=%s",
-                uid_s,
-                getattr(state2, "in_motion", None),
-                getattr(state2, "pending_target", None),
-                getattr(state2, "last_hub_pos", None),
-            )
-            state.retry_attempted = True
-            state.last_control_ts = time.monotonic()
-            self._last_global_control_ts = state.last_control_ts
-            await self.api.control(uid_s, bottom=int(target))
-            state = getattr(self, "_motion", {}).get(uid_s)
-            _LOGGER.debug(
-                "pos_debug_3: verify uid=%s state_before_retry in_motion=%s pending=%s last_hub_pos=%s",
-                uid_s,
-                getattr(state, "in_motion", None),
-                getattr(state, "pending_target", None),
-                getattr(state, "last_hub_pos", None),
-            )
-            await self.async_request_refresh()
-            state = getattr(self, "_motion", {}).get(uid_s)
-            _LOGGER.debug(
-                "pos_debug_4: verify uid=%s state_before_retry in_motion=%s pending=%s last_hub_pos=%s",
-                uid_s,
-                getattr(state, "in_motion", None),
-                getattr(state, "pending_target", None),
-                getattr(state, "last_hub_pos", None),
-            )
+        if shade.cmd_id != cmd_id:
+            return  # a newer command arrived while the retry was in flight; its bookkeeping wins
+        self._set_pending(shade, bottom=bottom, middle=middle, sent=True)
+        self._apply_poll_interval()
+        await self.async_refresh()

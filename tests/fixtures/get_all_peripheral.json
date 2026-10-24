@@ -1,0 +1,102 @@
+{
+  "status": {
+    "code": 0,
+    "error": ""
+  },
+  "results": {
+    "ThingName": "us-east-1:00000000-0000-0000-0000-000000000000_0000000000000000",
+    "CustomDeviceName": "ShadeHub",
+    "TimeZone": "America/Detroit",
+    "GeoLoc": {
+      "Latitude": "0.000000",
+      "Longitude": "0.000000"
+    },
+    "NetworkID": "0",
+    "RoomList": [
+      {
+        "RoomID": "11819",
+        "RoomName": "Room_2E2B",
+        "Icon": "1",
+        "Color": "1",
+        "Sorting": "0",
+        "SceneList": [],
+        "GroupList": [
+          {
+            "GroupID": "2",
+            "GroupName": "Group_2",
+            "Sorting": "2",
+            "PeripheralList": [
+              {
+                "PeripheralUID": "14500",
+                "PeripheralName": "PerfectSheer_38A4",
+                "Sorting": "0",
+                "ModuleType": "48",
+                "ModuleDetail": "3"
+              }
+            ]
+          },
+          {
+            "GroupID": "8",
+            "GroupName": "Group_4",
+            "Sorting": "4",
+            "PeripheralList": [
+              {
+                "PeripheralUID": "23500",
+                "PeripheralName": "Office",
+                "Sorting": "0",
+                "ModuleType": "48",
+                "ModuleDetail": "3"
+              }
+            ]
+          },
+          {
+            "GroupID": "4",
+            "GroupName": "Group_3",
+            "Sorting": "3",
+            "PeripheralList": [
+              {
+                "PeripheralUID": "23388",
+                "PeripheralName": "Guest Room",
+                "Sorting": "0",
+                "ModuleType": "48",
+                "ModuleDetail": "3"
+              }
+            ]
+          },
+          {
+            "GroupID": "1",
+            "GroupName": "Group_1",
+            "Sorting": "1",
+            "PeripheralList": [
+              {
+                "PeripheralUID": "12177",
+                "PeripheralName": "Kitchen",
+                "Sorting": "0",
+                "ModuleType": "48",
+                "ModuleDetail": "3"
+              }
+            ]
+          },
+          {
+            "GroupID": "16",
+            "GroupName": "Group_5",
+            "Sorting": "5",
+            "PeripheralList": [
+              {
+                "PeripheralUID": "3190",
+                "PeripheralName": "Master Bedroom",
+                "Sorting": "0",
+                "ModuleType": "48",
+                "ModuleDetail": "3"
+              }
+            ]
+          }
+        ]
+      }
+    ],
+    "SceneGroupList": [],
+    "TaskID": 1,
+    "RequestTimestamp": 1792658302,
+    "Timestamp": 1792658302321
+  }
+}

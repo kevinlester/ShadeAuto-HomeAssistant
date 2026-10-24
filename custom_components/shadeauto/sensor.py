@@ -1,73 +1,42 @@
+"""Battery level sensor, one per shade."""
+
 from __future__ import annotations
 
-from homeassistant.components.sensor import SensorEntity
-from homeassistant.config_entries import ConfigEntry
+from typing import TYPE_CHECKING
+
+from homeassistant.components.sensor import SensorDeviceClass, SensorEntity, SensorStateClass
+from homeassistant.const import PERCENTAGE, EntityCategory
 from homeassistant.core import HomeAssistant
-from homeassistant.helpers.update_coordinator import CoordinatorEntity
-from homeassistant.helpers.entity_platform import AddEntitiesCallback
-from homeassistant.helpers.entity import DeviceInfo
+from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
-from .const import DOMAIN
+from .const import ATTR_BATTERY
 from .coordinator import ShadeAutoCoordinator
+from .entity import ShadeAutoEntity
+from .util import battery_percent
+
+if TYPE_CHECKING:
+    from . import ShadeAutoConfigEntry
 
 
-def _raw_to_percent(raw):
-    if raw is None:
-        return None
-    try:
-        val = float(raw)
-    except (TypeError, ValueError):
-        return None
-    if 0 <= val <= 100:
-        return int(round(val))
-    if 2.5 <= val <= 5.5:
-        lo, hi = 3.30, 4.20
-        pct = (max(min(val, hi), lo) - lo) / (hi - lo) * 100
-        return int(round(pct))
-    return None
+async def async_setup_entry(
+    hass: HomeAssistant, entry: ShadeAutoConfigEntry, async_add_entities: AddConfigEntryEntitiesCallback
+) -> None:
+    coordinator = entry.runtime_data.coordinator
+    async_add_entities(ShadeAutoBattery(coordinator, uid) for uid in coordinator.peripherals)
 
 
-async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, add_entities: AddEntitiesCallback):
-    data = hass.data[DOMAIN][entry.entry_id]
-    coord: ShadeAutoCoordinator = data["coordinator"]
+class ShadeAutoBattery(ShadeAutoEntity, SensorEntity):
+    """The shade motor's battery level in percent."""
 
-    ents: list[ShadeAutoBattery] = []
-    for uid, meta in coord.peripherals.items():
-        ents.append(ShadeAutoBattery(coord, entry, uid, f"{meta.get('name','Shade')} Battery"))
-    add_entities(ents)
+    _attr_device_class = SensorDeviceClass.BATTERY
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_native_unit_of_measurement = PERCENTAGE
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _attr_translation_key = "battery"
 
-
-class ShadeAutoBattery(CoordinatorEntity[ShadeAutoCoordinator], SensorEntity):
-    _attr_should_poll = False
-    _attr_device_class = "battery"
-    _attr_state_class = "measurement"
-    _attr_native_unit_of_measurement = "%"
-
-    def __init__(self, coordinator: ShadeAutoCoordinator, entry: ConfigEntry, uid: str, name: str) -> None:
-        super().__init__(coordinator)
-        self._entry = entry
-        self._uid = uid
-        self._attr_name = name
-        thing = coordinator.data.get("thing_name") or coordinator.api.host
-        self._attr_unique_id = f"shadeauto_{thing}_{uid}_battery"
+    def __init__(self, coordinator: ShadeAutoCoordinator, uid: str) -> None:
+        super().__init__(coordinator, uid, unique_id_suffix="_battery")
 
     @property
-    def available(self) -> bool:
-        return self._uid in self.coordinator.data.get("status", {})
-
-    @property
-    def device_info(self) -> DeviceInfo:
-        host = self.coordinator.api.host
-        return DeviceInfo(
-            identifiers={(DOMAIN, f"shade_{host}_{self._uid}")},
-            via_device=(DOMAIN, f"hub_{host}"),
-            name=self.coordinator.peripherals.get(self._uid, {}).get("name", "Shade"),
-            manufacturer="Norman (ShadeAuto)",
-            model=str(self.coordinator.peripherals.get(self._uid, {}).get("module_detail") or "Shade"),
-        )
-
-    @property
-    def native_value(self):
-        st = self.coordinator.data.get("status", {}).get(self._uid, {})
-        raw = st.get("BatteryVoltage")
-        return _raw_to_percent(raw)
+    def native_value(self) -> int | None:
+        return battery_percent(self._status.get(ATTR_BATTERY))

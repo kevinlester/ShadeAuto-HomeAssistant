@@ -1,0 +1,36 @@
+# ShadeAuto hub characterization log, 2026-10-23, shade 12177 ("Kitchen")
+#
+# One 200 s probe of the same hub as hub-characterization-2026-10-22.log (NienMadeHub,
+# firmware 6.1.25). It was produced by a one-off standard-library script, not by
+# tools/hubwatch.py. The script:
+#   - called /registration for the ThingName;
+#   - held POST /NM/v1/notification open with http.client (request body
+#     {"ThingName": <ThingName>, "Timestamp": <now>, "Timeout": 300}), read the response
+#     with read1() as bytes arrived and split it into JSON objects with
+#     json.JSONDecoder().raw_decode; each object is an EVENT line, printed when it arrived;
+#   - polled /status about once a second and printed shade 12177's BottomRailPosition,
+#     TargetBottomRailPosition, MiddleRailPosition, TargetMiddleRailPosition and per-shade
+#     Timestamp (STATUS initial), then every change of them (STATUS change, as old/new pairs);
+#   - about 8 s in, sent one /control {"PeripheralUID": 12177, "StatusRequest": 0} plus
+#     TaskID, Timestamp and ThingName (the CONTROL line shows the hub's reply).
+# tools/hubwatch.py --notify now reads the stream the same way.
+#
+# Times are the client's wall clock, America/Detroit (EDT, UTC-4); "+N s" is seconds since
+# the probe started. "Status" in an EVENT and "Timestamp" in the /control reply are the hub's
+# clock in milliseconds; the per-shade Timestamp in STATUS lines is the hub's clock in seconds.
+# The vane move to 55 at 04:39 was not sent by the probe: it was made in the ShadeAuto app
+# (session notes, not machine-logged). The stream was opened once and never ended or failed
+# during the probe. No ThingName appears below.
+
+04:37:38 +   0.1s registered
+04:37:38 +   0.1s STREAM opened: HTTP 200 application/octet-stream TE=chunked
+04:37:38 +   0.1s EVENT {"Error": "Success."}
+04:37:38 +   0.1s STATUS initial {'BottomRailPosition': 0, 'TargetBottomRailPosition': 0, 'MiddleRailPosition': 0, 'TargetMiddleRailPosition': 0, 'Timestamp': 1792731364}
+04:37:47 +   8.4s CONTROL StatusRequest:0 -> {'PeripheralUID': 12177, 'StatusRequest': 0, 'Error': 0, 'TaskID': 1743304711, 'RequestTimestamp': 1792744667, 'Timestamp': 1792744667098}
+04:37:49 +  10.7s EVENT {"Status": 1792744669337, "PeripheralList": [12177]}
+04:37:50 +  11.6s STATUS change {'Timestamp': (1792731364, 1792744669)}
+04:39:04 +  86.1s EVENT {"Status": 1792744744841, "PeripheralList": [12177]}
+04:39:05 +  86.5s STATUS change {'TargetMiddleRailPosition': (0, 55)}
+04:39:26 + 107.6s EVENT {"Status": 1792744766350, "PeripheralList": [12177]}
+04:39:27 + 108.3s STATUS change {'MiddleRailPosition': (0, 55), 'Timestamp': (1792744669, 1792744766)}
+04:40:59 + 200.9s PROBE DONE

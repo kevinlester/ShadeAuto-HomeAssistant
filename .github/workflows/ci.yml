@@ -1,0 +1,142 @@
+name: CI
+
+on:
+  push:
+    branches: [main, "feature/**"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Home Assistant 2026.10 (pinned by requirements_test.txt) requires Python >= 3.14.
+  PYTHON_VERSION: "3.14"
+
+jobs:
+  lint:
+    name: Lint (ruff)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@18d369b23da25a81e9458561248e1aafff6a70fa # v10.3.1
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          enable-cache: true
+          cache-dependency-glob: requirements_test.txt
+      - name: Install tooling
+        run: |
+          uv venv
+          uv pip install -r requirements_test.txt
+      - name: ruff check
+        run: .venv/bin/ruff check --output-format=github .
+      - name: ruff format --check
+        run: .venv/bin/ruff format --check .
+
+  typecheck:
+    name: Type check (mypy)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@18d369b23da25a81e9458561248e1aafff6a70fa # v10.3.1
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          enable-cache: true
+          cache-dependency-glob: requirements_test.txt
+      - name: Install tooling
+        run: |
+          uv venv
+          uv pip install -r requirements_test.txt
+      - name: mypy
+        run: .venv/bin/mypy
+
+  test:
+    name: Tests (pytest, HA test harness)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@18d369b23da25a81e9458561248e1aafff6a70fa # v10.3.1
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          enable-cache: true
+          cache-dependency-glob: requirements_test.txt
+      - name: Install test dependencies
+        run: |
+          uv venv
+          uv pip install -r requirements_test.txt
+      - name: Run tests
+        run: .venv/bin/python -m pytest -p no:cacheprovider --cov-report=xml --cov-report=term-missing
+      - name: Upload coverage report
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: coverage-xml
+          path: coverage.xml
+          if-no-files-found: ignore
+
+  test-min:
+    # The oldest supported release (hacs.json "homeassistant"); see
+    # CONTRIBUTING.md "Supported Home Assistant versions". Dependencies are
+    # resolved as of that release, or newer transitive packages break the old
+    # core. Coverage is gated on the latest release only, because the shims in
+    # compat.py take the other branch here.
+    name: Tests on the minimum Home Assistant (2025.8)
+    runs-on: ubuntu-latest
+    env:
+      MIN_PYTHON_VERSION: "3.13"
+      MIN_EXCLUDE_NEWER: "2025-08-24T00:00:00Z"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@18d369b23da25a81e9458561248e1aafff6a70fa # v10.3.1
+        with:
+          python-version: ${{ env.MIN_PYTHON_VERSION }}
+          enable-cache: true
+          cache-dependency-glob: requirements_test_min.txt
+      - name: Install the minimum-version test harness
+        run: |
+          uv venv
+          uv pip install --exclude-newer "${MIN_EXCLUDE_NEWER}" -r requirements_test_min.txt
+      - name: Run tests
+        run: .venv/bin/python -m pytest -p no:cacheprovider -o addopts=""
+
+  sast:
+    name: Static analysis (bandit, pip-audit, zizmor)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@18d369b23da25a81e9458561248e1aafff6a70fa # v10.3.1
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          enable-cache: true
+          cache-dependency-glob: requirements_test.txt
+      - name: Install tooling
+        run: |
+          uv venv
+          uv pip install -r requirements_test.txt
+      - name: bandit (integration code)
+        run: .venv/bin/bandit -c pyproject.toml -r custom_components tools -ll
+      # Informational: the integration has no runtime requirements of its own, and
+      # the audited tree is pinned by homeassistant (via
+      # pytest-homeassistant-custom-component), so findings there cannot be fixed
+      # in this repository. Review the log when it turns red.
+      - name: pip-audit (test/tooling dependencies, informational)
+        continue-on-error: true
+        run: .venv/bin/pip-audit -r requirements_test.txt --strict --progress-spinner off
+      - name: zizmor (workflow security)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: .venv/bin/zizmor --format github .github/workflows

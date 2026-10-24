@@ -1,0 +1,9 @@
+# Test harness for the OLDEST supported Home Assistant release (hacs.json
+# "homeassistant"). pytest-homeassistant-custom-component 0.13.272 pins
+# homeassistant==2025.8.3 and needs Python >= 3.13. Install it with
+# dependencies resolved as of that release, or newer transitive packages
+# break the old core (CI does the same):
+#   uv venv --python 3.13 .venv-min
+#   uv pip install --python .venv-min/bin/python --exclude-newer 2025-08-24T00:00:00Z -r requirements_test_min.txt
+# Raise this together with hacs.json; see CONTRIBUTING.md.
+pytest-homeassistant-custom-component==0.13.272

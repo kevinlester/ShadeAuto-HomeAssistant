@@ -1,0 +1,42 @@
+name: Release
+
+# Pushing a tag like v0.4.0 publishes a GitHub release, which is what HACS
+# installs from. The tag must match the version in manifest.json.
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    name: Publish GitHub release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Check that manifest.json matches the tag
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          manifest_version=$(python3 -c 'import json; print(json.load(open("custom_components/shadeauto/manifest.json"))["version"])')
+          if [ "v${manifest_version}" != "${TAG}" ]; then
+            echo "::error::manifest.json version ${manifest_version} does not match tag ${TAG}"
+            exit 1
+          fi
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+          REPO: ${{ github.repository }}
+        run: |
+          gh release create "${TAG}" \
+            --repo "${REPO}" \
+            --title "ShadeAuto ${TAG#v}" \
+            --generate-notes \
+            --verify-tag

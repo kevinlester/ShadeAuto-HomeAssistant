@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-from homeassistant.components.binary_sensor import BinarySensorEntity, BinarySensorDeviceClass
+from homeassistant.components.binary_sensor import BinarySensorDeviceClass, BinarySensorEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
-from homeassistant.helpers.update_coordinator import CoordinatorEntity
-from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.entity import DeviceInfo
+from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import DOMAIN
 from .coordinator import ShadeAutoCoordinator
@@ -18,7 +18,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, add_entitie
 
     ents: list[ShadeAutoBatteryLow] = []
     for uid, meta in coord.peripherals.items():
-        ents.append(ShadeAutoBatteryLow(coord, entry, uid, f"{meta.get('name','Shade')} Battery Low"))
+        ents.append(ShadeAutoBatteryLow(coord, entry, uid, f"{meta.get('name', 'Shade')} Battery Low"))
     add_entities(ents)
 
 

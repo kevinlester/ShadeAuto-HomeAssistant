@@ -3,9 +3,9 @@ from __future__ import annotations
 from homeassistant.components.sensor import SensorEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
-from homeassistant.helpers.update_coordinator import CoordinatorEntity
-from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.entity import DeviceInfo
+from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import DOMAIN
 from .coordinator import ShadeAutoCoordinator
@@ -19,11 +19,11 @@ def _raw_to_percent(raw):
     except (TypeError, ValueError):
         return None
     if 0 <= val <= 100:
-        return int(round(val))
+        return round(val)
     if 2.5 <= val <= 5.5:
         lo, hi = 3.30, 4.20
         pct = (max(min(val, hi), lo) - lo) / (hi - lo) * 100
-        return int(round(pct))
+        return round(pct)
     return None
 
 
@@ -33,7 +33,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, add_entitie
 
     ents: list[ShadeAutoBattery] = []
     for uid, meta in coord.peripherals.items():
-        ents.append(ShadeAutoBattery(coord, entry, uid, f"{meta.get('name','Shade')} Battery"))
+        ents.append(ShadeAutoBattery(coord, entry, uid, f"{meta.get('name', 'Shade')} Battery"))
     add_entities(ents)
 
 

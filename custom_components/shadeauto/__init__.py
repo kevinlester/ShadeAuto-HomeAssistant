@@ -1,15 +1,14 @@
 from __future__ import annotations
-from datetime import timedelta
 
-from typing import Any
+from datetime import timedelta
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
-from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers import device_registry as dr
+from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
-from .const import DOMAIN, PLATFORMS, CONF_HOST, DEFAULT_POLL, DEFAULT_SEND_SPACING
 from .api import ShadeAutoApi
+from .const import CONF_HOST, DEFAULT_POLL, DEFAULT_SEND_SPACING, DOMAIN, PLATFORMS
 from .coordinator import ShadeAutoCoordinator
 
 
@@ -17,11 +16,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     host: str = entry.data[CONF_HOST]
     session = async_get_clientsession(hass)
     api = ShadeAutoApi(host, session)
-    # apply option-driven spacing without core restart
-    try:
-        api.send_spacing_sec = float(entry.options.get("send_spacing_sec"))
-    except Exception:
-        pass
 
     poll = entry.options.get("poll_seconds", DEFAULT_POLL)
     coordinator = ShadeAutoCoordinator(hass, api, poll)
@@ -63,6 +57,7 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         hass.data[DOMAIN].pop(entry.entry_id, None)
     return unloaded
 
+
 # --------------- helpers ---------------
 def _apply_options_to_runtime(hass: HomeAssistant, entry: ConfigEntry) -> None:
     """Apply all option values to live objects (no restart)."""
@@ -73,7 +68,7 @@ def _apply_options_to_runtime(hass: HomeAssistant, entry: ConfigEntry) -> None:
     # send_spacing_sec -> API pacing
     try:
         spacing = float(entry.options.get("send_spacing_sec", DEFAULT_SEND_SPACING))
-        setattr(api, "send_spacing_sec", spacing)
+        api.send_spacing_sec = spacing
     except Exception:
         pass
 

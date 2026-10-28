@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-import time
-import logging
 import asyncio
-from typing import Any, Dict, List, Optional
+import logging
+import time
+from typing import Any
 
 from aiohttp import ClientSession, ClientTimeout
 
@@ -32,7 +32,7 @@ class ShadeAutoApi:
         self._host = host
         self._base = f"http://{host}:10123"
         self._session = session
-        self.thing_name: Optional[str] = None
+        self.thing_name: str | None = None
         # Reliability helpers
         self._cmd_lock = asyncio.Lock()
         self._last_send = 0.0
@@ -42,7 +42,7 @@ class ShadeAutoApi:
     def host(self) -> str:
         return self._host
 
-    async def _post(self, path: str, payload: Dict[str, Any]) -> Any:
+    async def _post(self, path: str, payload: dict[str, Any]) -> Any:
         url = f"{self._base}{path}"
         timeout = ClientTimeout(total=10)
         _LOGGER.debug("POST %s %s", url, payload)
@@ -50,18 +50,18 @@ class ShadeAutoApi:
             resp.raise_for_status()
             return await resp.json(content_type=None)
 
-    async def registration(self) -> Dict[str, Any]:
+    async def registration(self) -> dict[str, Any]:
         data = await self._post("/NM/v1/registration", {"Timestamp": _now_ts()})
         if isinstance(data, dict):
             self.thing_name = data.get("ThingName") or data.get("thingName") or self.thing_name
         return data
 
-    async def get_all_peripheral(self) -> List[Dict[str, Any]]:
+    async def get_all_peripheral(self) -> list[dict[str, Any]]:
         payload = {"ThingName": self.thing_name, "TaskID": 1, "Timestamp": _now_ts()}
         data = await self._post("/NM/v1/GetAllPeripheral", payload)
         return list(_find_dicts_with_key(data, "PeripheralUID"))
 
-    async def status(self) -> List[Dict[str, Any]]:
+    async def status(self) -> list[dict[str, Any]]:
         payload = {"Timestamp": _now_ts()}
         data = await self._post("/NM/v1/status", payload)
         items = list(_find_dicts_with_key(data, "PeripheralUID"))
@@ -83,27 +83,28 @@ class ShadeAutoApi:
             pass
         return items
 
-    async def notification(self, *, timestamp: int, timeout: float) -> str:
-        """Call long-poll notification; return raw (possibly concatenated) JSON text."""
+    async def notification(self, *, timestamp: int, hold_sec: float) -> str:
+        """Call long-poll notification; return raw (possibly concatenated) JSON text.
+
+        ``hold_sec`` is both the hold time requested from the hub and the bound on
+        the client-side read.
+        """
+        hold_sec = float(hold_sec)
         payload = {
             "ThingName": self.thing_name,
             "Timestamp": int(timestamp),
-            "Timeout": float(timeout),
+            "Timeout": hold_sec,
         }
         url = f"{self._base}/NM/v1/notification"
-        client_timeout = None if timeout == -1 else timeout + 5
-        _LOGGER.debug("Notification timeout %d", timeout)
-        # Allow the server's hold; only bound the *read* time with some slack
-        # Bound the read with the user-requested timeout (no extra slack)
-        timeout = float(timeout)
-        timeout_cfg = ClientTimeout(total=None, sock_connect=10, sock_read=timeout)
+        _LOGGER.debug("Notification hold %.2fs", hold_sec)
+        timeout_cfg = ClientTimeout(total=None, sock_connect=10, sock_read=hold_sec)
 
         try:
             async with self._session.post(url, json=payload, timeout=timeout_cfg) as resp:
                 resp.raise_for_status()
                 return await resp.text()
-        except asyncio.TimeoutError:
-            _LOGGER.debug("notification: client read timeout after %.2fs (no events this window)", timeout)
+        except TimeoutError:
+            _LOGGER.debug("notification: client read timeout after %.2fs (no events this window)", hold_sec)
             return ""
 
     def _task_id(self) -> int:
@@ -116,7 +117,7 @@ class ShadeAutoApi:
         now = _now_ts()
         ts = now if now > self._last_ts else self._last_ts + 1
         self._last_ts = ts
-    
+
         payload: dict = {
             "PeripheralUID": int(uid) if str(uid).isdigit() else uid,
             "TaskID": self._task_id(),
@@ -126,10 +127,11 @@ class ShadeAutoApi:
             payload["ThingName"] = self.thing_name
         if bottom is not None:
             payload["BottomRailPosition"] = int(bottom)
-    
+
         # keep current per-hub send spacing
         async with self._cmd_lock:
             from .const import DEFAULT_SEND_SPACING
+
             spacing = getattr(self, "send_spacing_sec", DEFAULT_SEND_SPACING)
             gap = spacing - (time.time() - self._last_send)
             if gap > 0:
@@ -137,4 +139,3 @@ class ShadeAutoApi:
             resp = await self._post("/NM/v1/control", payload)
             self._last_send = time.time()
             return resp
-

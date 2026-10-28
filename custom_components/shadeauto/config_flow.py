@@ -1,26 +1,27 @@
 from __future__ import annotations
 
 from typing import Any
-from homeassistant.helpers.selector import selector
-import voluptuous as vol
+
 from homeassistant import config_entries
 from homeassistant.core import callback
 from homeassistant.data_entry_flow import FlowResult
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
+from homeassistant.helpers.selector import selector
+import voluptuous as vol
 
-from .const import (
-    DOMAIN,
-    CONF_HOST,
-    DEFAULT_POLL,
-    DEFAULT_LOW_BATT,
-    DEFAULT_SEND_SPACING,
-    DEFAULT_VERIFY_ENABLED,
-    DEFAULT_VERIFY_DELAY,
-    DEFAULT_NOTIFICATION_TIMEOUT,
-    DEFAULT_FULL_TRAVEL_TIME,
-    DEFAULT_ESTIMATION_ENABLED,
-)
 from .api import ShadeAutoApi
+from .const import (
+    CONF_HOST,
+    DEFAULT_ESTIMATION_ENABLED,
+    DEFAULT_FULL_TRAVEL_TIME,
+    DEFAULT_LOW_BATT,
+    DEFAULT_NOTIFICATION_TIMEOUT,
+    DEFAULT_POLL,
+    DEFAULT_SEND_SPACING,
+    DEFAULT_VERIFY_DELAY,
+    DEFAULT_VERIFY_ENABLED,
+    DOMAIN,
+)
 
 STEP_USER = vol.Schema({vol.Required(CONF_HOST): str})
 
@@ -56,32 +57,38 @@ class ShadeAutoOptionsFlow(config_entries.OptionsFlow):
 
     async def async_step_init(self, user_input: dict[str, Any] | None = None) -> FlowResult:
         current_host = self.entry.data.get(CONF_HOST, "")
-        schema = vol.Schema({
-            vol.Optional("host", default=current_host): selector({"text": {}}),
-
-            vol.Optional("poll_seconds", default=self.entry.options.get("poll_seconds", DEFAULT_POLL)):
-                selector({"number": {"min": 5, "max": 120, "step": 1, "unit_of_measurement": "s", "mode": "box"}}),vol.Optional("low_battery_threshold", default=self.entry.options.get("low_battery_threshold", DEFAULT_LOW_BATT)):
-                selector({"number": {"min": 5, "max": 50, "step": 1, "unit_of_measurement": "%"}}),
-
-            vol.Optional("send_spacing_sec", default=self.entry.options.get("send_spacing_sec", DEFAULT_SEND_SPACING)):
-                selector({"number": {"min": 0.15, "max": 1.0, "step": 0.05, "unit_of_measurement": "s"}}),
-
-            vol.Optional("verify_enabled", default=self.entry.options.get("verify_enabled", DEFAULT_VERIFY_ENABLED)):
-                selector({"boolean": {}}),
-
-            vol.Optional("verify_delay_sec", default=self.entry.options.get("verify_delay_sec", DEFAULT_VERIFY_DELAY)):
-                selector({"number": {"min": 1, "max": 60, "step": 1, "unit_of_measurement": "s"}}),
-
-            vol.Optional("notification_timeout_sec", default=self.entry.options.get("notification_timeout_sec", DEFAULT_NOTIFICATION_TIMEOUT)): 
-                selector({"number":{"min":-1,"max":10,"step":1,"unit_of_measurement":"s"}}),
-
-            vol.Optional("estimation_enabled", default=self.entry.options.get("estimation_enabled", DEFAULT_ESTIMATION_ENABLED)):
-                selector({"boolean": {}}),
-
-            vol.Optional("full_travel_time_sec", default=self.entry.options.get("full_travel_time_sec", DEFAULT_FULL_TRAVEL_TIME)):
-                selector({"number": {"min": 5, "max": 120, "step": 1, "unit_of_measurement": "s"}}),
-
-        })
+        schema = vol.Schema(
+            {
+                vol.Optional("host", default=current_host): selector({"text": {}}),
+                vol.Optional("poll_seconds", default=self.entry.options.get("poll_seconds", DEFAULT_POLL)): selector(
+                    {"number": {"min": 5, "max": 120, "step": 1, "unit_of_measurement": "s", "mode": "box"}}
+                ),
+                vol.Optional(
+                    "low_battery_threshold", default=self.entry.options.get("low_battery_threshold", DEFAULT_LOW_BATT)
+                ): selector({"number": {"min": 5, "max": 50, "step": 1, "unit_of_measurement": "%"}}),
+                vol.Optional(
+                    "send_spacing_sec", default=self.entry.options.get("send_spacing_sec", DEFAULT_SEND_SPACING)
+                ): selector({"number": {"min": 0.15, "max": 1.0, "step": 0.05, "unit_of_measurement": "s"}}),
+                vol.Optional(
+                    "verify_enabled", default=self.entry.options.get("verify_enabled", DEFAULT_VERIFY_ENABLED)
+                ): selector({"boolean": {}}),
+                vol.Optional(
+                    "verify_delay_sec", default=self.entry.options.get("verify_delay_sec", DEFAULT_VERIFY_DELAY)
+                ): selector({"number": {"min": 1, "max": 60, "step": 1, "unit_of_measurement": "s"}}),
+                vol.Optional(
+                    "notification_timeout_sec",
+                    default=self.entry.options.get("notification_timeout_sec", DEFAULT_NOTIFICATION_TIMEOUT),
+                ): selector({"number": {"min": -1, "max": 10, "step": 1, "unit_of_measurement": "s"}}),
+                vol.Optional(
+                    "estimation_enabled",
+                    default=self.entry.options.get("estimation_enabled", DEFAULT_ESTIMATION_ENABLED),
+                ): selector({"boolean": {}}),
+                vol.Optional(
+                    "full_travel_time_sec",
+                    default=self.entry.options.get("full_travel_time_sec", DEFAULT_FULL_TRAVEL_TIME),
+                ): selector({"number": {"min": 5, "max": 120, "step": 1, "unit_of_measurement": "s"}}),
+            }
+        )
         if user_input is not None:
             # If host changed, update entry.data and reload
             new_host = user_input.get("host", current_host)

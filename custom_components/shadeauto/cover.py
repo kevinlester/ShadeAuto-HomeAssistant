@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-from typing import Any
-import time
-import logging
 import asyncio
+import logging
+import time
+from typing import Any
 
 from homeassistant.components.cover import (
     CoverEntity,
@@ -12,14 +12,14 @@ from homeassistant.components.cover import (
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity import DeviceInfo
-from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import DOMAIN
 from .coordinator import ShadeAutoCoordinator
-import logging
 
 _LOGGER = logging.getLogger(__name__)
+
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, add_entities: AddEntitiesCallback):
     data = hass.data[DOMAIN][entry.entry_id]
@@ -31,14 +31,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, add_entitie
     add_entities(entities)
 
 
-
 class ShadeAutoCover(CoordinatorEntity[ShadeAutoCoordinator], CoverEntity):
     _attr_should_poll = False
-    _attr_supported_features = (
-        CoverEntityFeature.OPEN
-        | CoverEntityFeature.CLOSE
-        | CoverEntityFeature.SET_POSITION
-    )
+    _attr_supported_features = CoverEntityFeature.OPEN | CoverEntityFeature.CLOSE | CoverEntityFeature.SET_POSITION
 
     def __init__(self, coordinator: ShadeAutoCoordinator, entry: ConfigEntry, uid: str, name: str) -> None:
         super().__init__(coordinator)
@@ -80,7 +75,7 @@ class ShadeAutoCover(CoordinatorEntity[ShadeAutoCoordinator], CoverEntity):
 
     def _estimation_config(self) -> tuple[bool, float]:
         """Read estimation settings from options (or defaults)."""
-        from .const import DEFAULT_FULL_TRAVEL_TIME, DEFAULT_ESTIMATION_ENABLED
+        from .const import DEFAULT_ESTIMATION_ENABLED, DEFAULT_FULL_TRAVEL_TIME
 
         est_enabled = DEFAULT_ESTIMATION_ENABLED
         full_time = DEFAULT_FULL_TRAVEL_TIME
@@ -112,20 +107,20 @@ class ShadeAutoCover(CoordinatorEntity[ShadeAutoCoordinator], CoverEntity):
 
         if self._est_travel_time_s is None or self._est_travel_time_s <= 0:
             _LOGGER.debug("current_estimated_position: uid=%s No Travel Time", self._uid)
-            return int(round(self._est_target))
+            return round(self._est_target)
 
         dt = max(0.0, now - self._est_start_ts)
         if dt >= self._est_travel_time_s:
             _LOGGER.debug("current_estimated_position: uid=%s Complete Travel Time", self._uid)
-            return int(round(self._est_target))
+            return round(self._est_target)
 
         ratio = max(0.0, min(dt / self._est_travel_time_s, 1.0))
         est = self._est_start_pos + (self._est_target - self._est_start_pos) * ratio
         try:
             _LOGGER.debug("current_estimated_position: uid=%s Estimate = %s", self._uid, est)
-            return int(round(est))
+            return round(est)
         except (TypeError, ValueError):
-            return int(round(self._est_target))
+            return round(self._est_target)
 
     def _start_estimation_for_command(self, target: int) -> None:
         """Start or update estimation state when a new command is issued."""
@@ -142,7 +137,12 @@ class ShadeAutoCover(CoordinatorEntity[ShadeAutoCoordinator], CoverEntity):
         # Estimate starting position for this command: if we have an ongoing estimation, advance it;
         # otherwise fall back to the last known position.
         start_pos: float | None = None
-        if self._est_start_pos is not None and self._est_target is not None and self._est_start_ts is not None and self._est_travel_time_s:
+        if (
+            self._est_start_pos is not None
+            and self._est_target is not None
+            and self._est_start_ts is not None
+            and self._est_travel_time_s
+        ):
             dt_prev = max(0.0, now - self._est_start_ts)
             if self._est_travel_time_s > 0:
                 ratio_prev = max(0.0, min(dt_prev / self._est_travel_time_s, 1.0))
@@ -208,7 +208,7 @@ class ShadeAutoCover(CoordinatorEntity[ShadeAutoCoordinator], CoverEntity):
         """Periodically refresh HA state so the slider moves smoothly."""
         try:
             _LOGGER.debug("_animate_slider: uid=%s Starting", self._uid)
-            # Aim for ~10–20 updates over the travel window, but bound the interval
+            # Aim for ~10-20 updates over the travel window, but bound the interval
             min_interval = 0.1
             max_interval = 0.5
             if self._est_travel_time_s is None or self._est_travel_time_s <= 0:
@@ -224,11 +224,7 @@ class ShadeAutoCover(CoordinatorEntity[ShadeAutoCoordinator], CoverEntity):
                 self.async_write_ha_state()
 
                 # Stop if we no longer have an active estimation
-                if (
-                    self._est_start_ts is None
-                    or self._est_travel_time_s is None
-                    or self._est_travel_time_s <= 0
-                ):
+                if self._est_start_ts is None or self._est_travel_time_s is None or self._est_travel_time_s <= 0:
                     break
 
                 dt = time.monotonic() - self._est_start_ts
@@ -246,7 +242,7 @@ class ShadeAutoCover(CoordinatorEntity[ShadeAutoCoordinator], CoverEntity):
             self.async_write_ha_state()
             self._anim_task = None
             _LOGGER.debug("_animate_slider: uid=%s Finished", self._uid)
-            
+
     # --- core properties ---
 
     @property
@@ -264,7 +260,13 @@ class ShadeAutoCover(CoordinatorEntity[ShadeAutoCoordinator], CoverEntity):
     @property
     def is_opening(self) -> bool | None:
         est_enabled, _ = self._estimation_config()
-        if not est_enabled or self._est_start_pos is None or self._est_target is None or self._est_start_ts is None or self._est_travel_time_s is None:
+        if (
+            not est_enabled
+            or self._est_start_pos is None
+            or self._est_target is None
+            or self._est_start_ts is None
+            or self._est_travel_time_s is None
+        ):
             return None
         now = time.monotonic()
         if now - self._est_start_ts >= self._est_travel_time_s:
@@ -276,7 +278,13 @@ class ShadeAutoCover(CoordinatorEntity[ShadeAutoCoordinator], CoverEntity):
     @property
     def is_closing(self) -> bool | None:
         est_enabled, _ = self._estimation_config()
-        if not est_enabled or self._est_start_pos is None or self._est_target is None or self._est_start_ts is None or self._est_travel_time_s is None:
+        if (
+            not est_enabled
+            or self._est_start_pos is None
+            or self._est_target is None
+            or self._est_start_ts is None
+            or self._est_travel_time_s is None
+        ):
             return None
         now = time.monotonic()
         if now - self._est_start_ts >= self._est_travel_time_s:
@@ -310,4 +318,3 @@ class ShadeAutoCover(CoordinatorEntity[ShadeAutoCoordinator], CoverEntity):
         self.async_write_ha_state()
         await self.coordinator.api.control(self._uid, bottom=target)
         self.coordinator.register_command(self._uid, target)
-

@@ -1,19 +1,20 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
+from dataclasses import dataclass
+from datetime import timedelta
 import json
 import logging
 import re
 import time
-from dataclasses import dataclass
-from datetime import timedelta
-from typing import Any, Dict, List
+from typing import Any
 
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
 from .api import ShadeAutoApi
-from .const import DEFAULT_POLL, DEFAULT_NOTIFICATION_TIMEOUT, DEFAULT_VERIFY_ENABLED, DEFAULT_VERIFY_DELAY
+from .const import DEFAULT_NOTIFICATION_TIMEOUT, DEFAULT_POLL, DEFAULT_VERIFY_DELAY, DEFAULT_VERIFY_ENABLED
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -21,16 +22,17 @@ _LOGGER = logging.getLogger(__name__)
 @dataclass
 class ShadeMotionState:
     """Per-shade motion / verification state."""
+
     last_hub_pos: int | None = None
     pending_target: int | None = None
     in_motion: bool = False
     last_control_ts: float | None = None  # monotonic()
     retry_attempted: bool = False
-    start_pos: int | None = None          # hub pos at time of last command
-    saw_move_since_cmd: bool = False      # have we seen a different pos since that command?
+    start_pos: int | None = None  # hub pos at time of last command
+    saw_move_since_cmd: bool = False  # have we seen a different pos since that command?
 
 
-class ShadeAutoCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
+class ShadeAutoCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     """Polls hub status and caches peripherals + latest state."""
 
     def __init__(self, hass: HomeAssistant, api: ShadeAutoApi, poll_seconds: int) -> None:
@@ -41,9 +43,9 @@ class ShadeAutoCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
             update_interval=timedelta(seconds=int(poll_seconds) if poll_seconds else DEFAULT_POLL),
         )
         self.api = api
-        self._peripherals: Dict[str, Dict[str, Any]] = {}
+        self._peripherals: dict[str, dict[str, Any]] = {}
         self._cmd_seq = 0
-        self._last_cmd: Dict[str, Dict[str, Any]] = {}
+        self._last_cmd: dict[str, dict[str, Any]] = {}
         # Motion / fake-position state
         self._motion: dict[str, ShadeMotionState] = {}
         # Long-poll state
@@ -54,7 +56,7 @@ class ShadeAutoCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
         self.config_entry = None
 
     @property
-    def peripherals(self) -> Dict[str, Dict[str, Any]]:
+    def peripherals(self) -> dict[str, dict[str, Any]]:
         return self._peripherals
 
     async def async_config_entry_first_refresh(self) -> None:
@@ -71,7 +73,7 @@ class ShadeAutoCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
         }
         await super().async_config_entry_first_refresh()
 
-    async def _async_update_data(self) -> Dict[str, Any]:
+    async def _async_update_data(self) -> dict[str, Any]:
         try:
             status = await self.api.status()
         except Exception as err:  # pragma: no cover - transport errors are logged by HA
@@ -82,9 +84,9 @@ class ShadeAutoCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
 
     # --- motion helpers ---
 
-    def _build_status_by_uid(self, status: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+    def _build_status_by_uid(self, status: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
         """Normalise hub status list into a dict keyed by UID and update motion state."""
-        by_uid: Dict[str, Dict[str, Any]] = {}
+        by_uid: dict[str, dict[str, Any]] = {}
         for item in status:
             uid = str(item.get("PeripheralUID") or "")
             if not uid:
@@ -115,23 +117,24 @@ class ShadeAutoCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
 
             # If we have a baseline for this command and we've seen a different pos,
             # remember that we've observed actual motion since the command started.
-            if (
-                state.start_pos is not None
-                and pos_i is not None
-                and abs(pos_i - state.start_pos) > 2
-            ):
+            if state.start_pos is not None and pos_i is not None and abs(pos_i - state.start_pos) > 2:
                 state.saw_move_since_cmd = True
 
-            if state.in_motion and state.pending_target is not None and pos_i is not None:
-                if abs(pos_i - state.pending_target) <= 2 and state.saw_move_since_cmd:
-                    self.logger.debug(
-                        "motion: UID %s hub pos %s ≈ target %s → settled",
-                        uid,
-                        pos_i,
-                        state.pending_target,
-                    )
-                    state.in_motion = False
-                    state.pending_target = None
+            if (
+                state.in_motion
+                and state.pending_target is not None
+                and pos_i is not None
+                and abs(pos_i - state.pending_target) <= 2
+                and state.saw_move_since_cmd
+            ):
+                self.logger.debug(
+                    "motion: UID %s hub pos %s ≈ target %s → settled",
+                    uid,
+                    pos_i,
+                    state.pending_target,
+                )
+                state.in_motion = False
+                state.pending_target = None
 
         return by_uid
 
@@ -160,7 +163,11 @@ class ShadeAutoCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
             state = self._motion.setdefault(uid, ShadeMotionState())
             if pos_i is not None:
                 state.last_hub_pos = pos_i
-                if state.pending_target is not None and abs(pos_i - state.pending_target) <= 2 and state.saw_move_since_cmd:
+                if (
+                    state.pending_target is not None
+                    and abs(pos_i - state.pending_target) <= 2
+                    and state.saw_move_since_cmd
+                ):
                     self.logger.debug(
                         "cache prune: UID %s pos %s ≈ target %s → settled",
                         uid,
@@ -177,10 +184,8 @@ class ShadeAutoCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
         state = getattr(self, "_motion", {}).get(uid)
         raw = None
         # Try to read the cached hub value for debug purposes
-        try:
+        with contextlib.suppress(Exception):
             raw = (self.data or {}).get("status", {}).get(uid, {}).get("BottomRailPosition")
-        except Exception:
-            pass
 
         if state and state.in_motion and state.pending_target is not None:
             _LOGGER.debug(
@@ -213,7 +218,6 @@ class ShadeAutoCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
         except (TypeError, ValueError):
             return None
 
-
     # --- command / verify / long-poll ---
 
     def register_command(self, uid: str, target: int) -> int:
@@ -232,7 +236,7 @@ class ShadeAutoCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
         # Baseline for this command: where did the hub think we were when we started?
         state.start_pos = state.last_hub_pos
         state.saw_move_since_cmd = False
-        
+
         state.in_motion = True
         state.pending_target = target_i
         state.last_control_ts = now
@@ -256,9 +260,7 @@ class ShadeAutoCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
             pass
 
         if verify_enabled and verify_delay > 0:
-            self.hass.async_create_task(
-                self.async_verify_and_retry(uid_s, target_i, delay=verify_delay, cmd_id=cid)
-            )
+            self.hass.async_create_task(self.async_verify_and_retry(uid_s, target_i, delay=verify_delay, cmd_id=cid))
 
         return cid
 
@@ -272,10 +274,7 @@ class ShadeAutoCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
             while self._pending_uids():
                 # 2-minute failsafe from last control
                 now_mono = time.monotonic()
-                if (
-                    self._last_global_control_ts is not None
-                    and now_mono - self._last_global_control_ts > 120.0
-                ):
+                if self._last_global_control_ts is not None and now_mono - self._last_global_control_ts > 120.0:
                     self.logger.warning(
                         "long-poll: >120s since last control; clearing motion state and stopping watcher"
                     )
@@ -294,13 +293,15 @@ class ShadeAutoCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
 
                 ce = getattr(self, "config_entry", None)
                 try:
-                    timeout = float(
-                        ce.options.get("notification_timeout_sec", DEFAULT_NOTIFICATION_TIMEOUT)
-                    ) if ce else float(DEFAULT_NOTIFICATION_TIMEOUT)
+                    timeout = (
+                        float(ce.options.get("notification_timeout_sec", DEFAULT_NOTIFICATION_TIMEOUT))
+                        if ce
+                        else float(DEFAULT_NOTIFICATION_TIMEOUT)
+                    )
                 except Exception:
                     timeout = float(DEFAULT_NOTIFICATION_TIMEOUT)
 
-                # Make sure our watermark doesn’t go backwards
+                # Make sure our watermark doesn't go backwards
                 now_s = int(time.time())
                 if self._notif_ts < now_s - 1:
                     self._notif_ts = now_s
@@ -308,13 +309,11 @@ class ShadeAutoCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
                 self.logger.debug("long-poll: hold %.2fs from ts=%s", timeout, self._notif_ts)
 
                 try:
-                    raw = await self.api.notification(timestamp=self._notif_ts, timeout=timeout)
+                    raw = await self.api.notification(timestamp=self._notif_ts, hold_sec=timeout)
                 except asyncio.CancelledError:
                     raise
                 except Exception:
-                    self.logger.exception(
-                        "long-poll: notification() failed; will retry while any shade is pending"
-                    )
+                    self.logger.exception("long-poll: notification() failed; will retry while any shade is pending")
                     await asyncio.sleep(1.0)
                     continue
 
@@ -387,9 +386,13 @@ class ShadeAutoCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
 
         # Quick check from motion state first
         state = self._motion.get(uid_s)
-        if state and state.pending_target is not None and state.last_hub_pos is not None:
-            if abs(state.last_hub_pos - state.pending_target) <= 2:
-                return
+        if (
+            state
+            and state.pending_target is not None
+            and state.last_hub_pos is not None
+            and abs(state.last_hub_pos - state.pending_target) <= 2
+        ):
+            return
 
         # Fallback to cached status for the UID
         await self.async_request_refresh()

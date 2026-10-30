@@ -39,6 +39,25 @@ jobs:
       - name: ruff format --check
         run: .venv/bin/ruff format --check .
 
+  typecheck:
+    name: Type check (mypy)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@18d369b23da25a81e9458561248e1aafff6a70fa # v10.3.1
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          enable-cache: true
+          cache-dependency-glob: requirements_test.txt
+      - name: Install tooling
+        run: |
+          uv venv
+          uv pip install -r requirements_test.txt
+      - name: mypy
+        run: .venv/bin/mypy
+
   test:
     name: Tests (pytest, HA test harness)
     runs-on: ubuntu-latest

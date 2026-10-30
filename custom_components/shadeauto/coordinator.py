@@ -1,7 +1,16 @@
+"""Polling coordinator: fetches hub status and tracks commanded moves.
+
+Data flow: a cover entity sends a command through :class:`ShadeAutoApi` and
+then calls :meth:`ShadeAutoCoordinator.register_command`. The coordinator polls
+``/status`` on a fixed interval, re-reads it early whenever the hub's long-poll
+notification names a shade we are waiting for, and after ``verify_delay_sec``
+checks once that the shade reached its target, retrying the command a single
+time if it did not.
+"""
+
 from __future__ import annotations
 
 import asyncio
-import contextlib
 from dataclasses import dataclass
 from datetime import timedelta
 import json
@@ -10,442 +19,306 @@ import re
 import time
 from typing import Any
 
+from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import ConfigEntryNotReady
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
-from .api import ShadeAutoApi
-from .const import DEFAULT_NOTIFICATION_TIMEOUT, DEFAULT_POLL, DEFAULT_VERIFY_DELAY, DEFAULT_VERIFY_ENABLED
+from .api import ShadeAutoApi, ShadeAutoError
+from .const import (
+    ATTR_BATTERY,
+    ATTR_BOTTOM_RAIL,
+    ATTR_PERIPHERAL_UID,
+    DOMAIN,
+    MOTION_FAILSAFE_SEC,
+    POSITION_TOLERANCE,
+)
+from .options import ShadeAutoOptions
+from .util import to_int
 
 _LOGGER = logging.getLogger(__name__)
+
+# Fields copied from each /status record into the coordinator's data.
+STATUS_FIELDS = (ATTR_BOTTOM_RAIL, ATTR_BATTERY, "Name")
+
+# A notification body may hold several JSON objects back to back.
+_JSON_OBJECT_BOUNDARY = re.compile(r"}\s*{")
+# Timestamps above this value are milliseconds rather than seconds.
+_MILLISECOND_THRESHOLD = 10_000_000_000
+
+
+@dataclass(frozen=True, slots=True)
+class Peripheral:
+    """Static facts about one shade, from ``/GetAllPeripheral``."""
+
+    uid: str
+    name: str
+    module_type: int | None
+    module_detail: int | None
+
+    @classmethod
+    def from_hub(cls, record: dict[str, Any]) -> Peripheral:
+        uid = str(record.get(ATTR_PERIPHERAL_UID))
+        return cls(
+            uid=uid,
+            name=record.get("Name") or record.get("DisplayName") or f"Shade {uid}",
+            module_type=to_int(record.get("ModuleType")),
+            module_detail=to_int(record.get("ModuleDetail")),
+        )
 
 
 @dataclass
 class ShadeMotionState:
-    """Per-shade motion / verification state."""
+    """What the coordinator knows about a shade's last commanded move."""
 
-    last_hub_pos: int | None = None
-    pending_target: int | None = None
+    last_hub_pos: int | None = None  # most recent BottomRailPosition from the hub
+    pending_target: int | None = None  # position we asked for and have not seen reached
     in_motion: bool = False
-    last_control_ts: float | None = None  # monotonic()
+    last_control_ts: float | None = None  # time.monotonic() when the last command was sent
     retry_attempted: bool = False
-    start_pos: int | None = None  # hub pos at time of last command
-    saw_move_since_cmd: bool = False  # have we seen a different pos since that command?
+    start_pos: int | None = None  # hub position when the command was sent
+    saw_move_since_cmd: bool = False  # the hub position has changed since the command
+
+    def is_at_target(self, pos: int) -> bool:
+        return self.pending_target is not None and abs(pos - self.pending_target) <= POSITION_TOLERANCE
+
+    def mark_settled(self) -> None:
+        self.in_motion = False
+        self.pending_target = None
 
 
 class ShadeAutoCoordinator(DataUpdateCoordinator[dict[str, Any]]):
-    """Polls hub status and caches peripherals + latest state."""
+    """Polls the hub and keeps the per-shade status that entities render."""
 
-    def __init__(self, hass: HomeAssistant, api: ShadeAutoApi, poll_seconds: int) -> None:
+    config_entry: ConfigEntry
+
+    def __init__(self, hass: HomeAssistant, entry: ConfigEntry, api: ShadeAutoApi, options: ShadeAutoOptions) -> None:
         super().__init__(
             hass,
             _LOGGER,
-            name="ShadeAuto Coordinator",
-            update_interval=timedelta(seconds=int(poll_seconds) if poll_seconds else DEFAULT_POLL),
+            config_entry=entry,
+            name=f"{DOMAIN} {api.host}",
+            update_interval=timedelta(seconds=options.poll_seconds),
         )
         self.api = api
-        self._peripherals: dict[str, dict[str, Any]] = {}
-        self._cmd_seq = 0
-        self._last_cmd: dict[str, dict[str, Any]] = {}
-        # Motion / fake-position state
+        self.options = options
+        self.hub_device_id: str | None = None  # set by __init__ once the hub device exists
+        self.peripherals: dict[str, Peripheral] = {}
         self._motion: dict[str, ShadeMotionState] = {}
-        # Long-poll state
-        self._notif_task: asyncio.Task | None = None
-        self._notif_ts: int = int(time.time())
-        self._last_global_control_ts: float | None = None
-        # ConfigEntry is wired in __init__.py
-        self.config_entry = None
+        self._cmd_seq = 0
+        self._last_cmd_id: dict[str, int] = {}  # newest command per shade, so stale verifies can bail
+        self._notif_task: asyncio.Task[None] | None = None
+        self._notif_ts = int(time.time())  # watermark passed to /notification
+        self._last_control_ts: float | None = None
+
+    # --- lookups used by entities -------------------------------------------
 
     @property
-    def peripherals(self) -> dict[str, dict[str, Any]]:
-        return self._peripherals
+    def identity(self) -> str:
+        """Stable hub identity for unique IDs: its ThingName, else the host."""
+        return self.api.thing_name or self.api.host
+
+    def status_for(self, uid: str) -> dict[str, Any]:
+        """The most recent ``/status`` record for ``uid`` (empty if unknown)."""
+        status: dict[str, dict[str, Any]] = (self.data or {}).get("status", {})
+        return status.get(str(uid), {})
+
+    def get_effective_position(self, uid: str) -> int | None:
+        """Position to show: the pending target while moving, else the hub's value."""
+        state = self._motion.get(str(uid))
+        if state and state.in_motion and state.pending_target is not None:
+            return state.pending_target
+        if state and state.last_hub_pos is not None:
+            return state.last_hub_pos
+        return to_int(self.status_for(uid).get(ATTR_BOTTOM_RAIL))
+
+    # --- polling --------------------------------------------------------------
 
     async def async_config_entry_first_refresh(self) -> None:
-        await self.api.registration()
-        per_list = await self.api.get_all_peripheral()
-        self._peripherals = {
-            str(p.get("PeripheralUID")): {
-                "name": p.get("Name") or p.get("DisplayName") or f"Shade {p.get('PeripheralUID')}",
-                "room_id": p.get("RoomID"),
-                "module_type": p.get("ModuleType"),
-                "module_detail": p.get("ModuleDetail"),
-            }
-            for p in per_list
-        }
+        try:
+            await self.api.registration()
+            records = await self.api.get_all_peripheral()
+        except ShadeAutoError as err:
+            raise ConfigEntryNotReady(f"Cannot reach ShadeAuto hub at {self.api.host}: {err}") from err
+        self.peripherals = {p.uid: p for p in map(Peripheral.from_hub, records)}
         await super().async_config_entry_first_refresh()
 
     async def _async_update_data(self) -> dict[str, Any]:
         try:
             status = await self.api.status()
-        except Exception as err:  # pragma: no cover - transport errors are logged by HA
+        except ShadeAutoError as err:
             raise UpdateFailed(f"status error: {err}") from err
-
-        by_uid = self._build_status_by_uid(status)
-        return {"thing_name": self.api.thing_name, "peripherals": self._peripherals, "status": by_uid}
-
-    # --- motion helpers ---
+        return {"status": self._build_status_by_uid(status)}
 
     def _build_status_by_uid(self, status: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
-        """Normalise hub status list into a dict keyed by UID and update motion state."""
+        """Key the hub's status list by UID and feed positions into motion tracking."""
         by_uid: dict[str, dict[str, Any]] = {}
         for item in status:
-            uid = str(item.get("PeripheralUID") or "")
+            uid = str(item.get(ATTR_PERIPHERAL_UID) or "")
             if not uid:
                 continue
-            cur = by_uid.setdefault(uid, {})
-            for k in ("BottomRailPosition", "BatteryVoltage", "Name"):
-                if k in item:
-                    cur[k] = item[k]
-
-            state = self._motion.setdefault(uid, ShadeMotionState())
-            pos = cur.get("BottomRailPosition")
-            try:
-                pos_i = int(pos) if pos is not None else None
-            except (TypeError, ValueError):
-                pos_i = None
-            state = getattr(self, "_motion", {}).get(uid)
-            _LOGGER.debug(
-                "pos_debug: status uid=%s raw=%s pos_i=%s state_exists=%s in_motion=%s pending=%s last_hub_pos=%s",
-                uid,
-                pos,
-                pos_i,
-                state is not None,
-                getattr(state, "in_motion", None),
-                getattr(state, "pending_target", None),
-                getattr(state, "last_hub_pos", None),
-            )
-            state.last_hub_pos = pos_i
-
-            # If we have a baseline for this command and we've seen a different pos,
-            # remember that we've observed actual motion since the command started.
-            if state.start_pos is not None and pos_i is not None and abs(pos_i - state.start_pos) > 2:
-                state.saw_move_since_cmd = True
-
-            if (
-                state.in_motion
-                and state.pending_target is not None
-                and pos_i is not None
-                and abs(pos_i - state.pending_target) <= 2
-                and state.saw_move_since_cmd
-            ):
-                self.logger.debug(
-                    "motion: UID %s hub pos %s ≈ target %s → settled",
-                    uid,
-                    pos_i,
-                    state.pending_target,
-                )
-                state.in_motion = False
-                state.pending_target = None
-
+            record = by_uid.setdefault(uid, {})
+            for key in STATUS_FIELDS:
+                if key in item:
+                    record[key] = item[key]
+            self._observe_position(uid, to_int(record.get(ATTR_BOTTOM_RAIL)))
         return by_uid
 
+    def _observe_position(self, uid: str, pos: int | None) -> None:
+        """Update motion state for ``uid`` with a position reported by the hub."""
+        state = self._motion.setdefault(uid, ShadeMotionState())
+        state.last_hub_pos = pos
+        if pos is None:
+            return
+        if state.start_pos is not None and abs(pos - state.start_pos) > POSITION_TOLERANCE:
+            state.saw_move_since_cmd = True
+        if state.in_motion and state.saw_move_since_cmd and state.is_at_target(pos):
+            _LOGGER.debug("UID %s reached %s (target %s); settled", uid, pos, state.pending_target)
+            state.mark_settled()
+
     def _pending_uids(self) -> list[str]:
-        """Return UIDs that we still consider in-motion."""
+        """Shades we have commanded and not yet seen arrive."""
         return [uid for uid, st in self._motion.items() if st.in_motion and st.pending_target is not None]
 
-    def _prune_pending_with_cache(self) -> bool:
-        """Use cached status to mark shades as done if they already reached their target.
-
-        Returns True if nothing remains pending.
-        """
-        pending = self._pending_uids()
-        if not self._peripherals or not pending:
-            return not pending
-
-        st = (self.data or {}).get("status", {}) or {}
-        for uid in list(pending):
-            cur = st.get(str(uid), {})
-            pos = cur.get("BottomRailPosition")
-            try:
-                pos_i = int(pos) if pos is not None else None
-            except (TypeError, ValueError):
-                pos_i = None
-
-            state = self._motion.setdefault(uid, ShadeMotionState())
-            if pos_i is not None:
-                state.last_hub_pos = pos_i
-                if (
-                    state.pending_target is not None
-                    and abs(pos_i - state.pending_target) <= 2
-                    and state.saw_move_since_cmd
-                ):
-                    self.logger.debug(
-                        "cache prune: UID %s pos %s ≈ target %s → settled",
-                        uid,
-                        pos_i,
-                        state.pending_target,
-                    )
-                    state.in_motion = False
-                    state.pending_target = None
-
+    def _settle_from_cache(self) -> bool:
+        """Re-check pending shades against the cached status; True when none remain."""
+        for uid in self._pending_uids():
+            self._observe_position(uid, to_int(self.status_for(uid).get(ATTR_BOTTOM_RAIL)))
         return not self._pending_uids()
 
-    def get_effective_position(self, uid: str) -> int | None:
-        uid = str(uid)
-        state = getattr(self, "_motion", {}).get(uid)
-        raw = None
-        # Try to read the cached hub value for debug purposes
-        with contextlib.suppress(Exception):
-            raw = (self.data or {}).get("status", {}).get(uid, {}).get("BottomRailPosition")
-
-        if state and state.in_motion and state.pending_target is not None:
-            _LOGGER.debug(
-                "pos_debug: get_effective_position uid=%s -> pending=%s (in_motion=True, last_hub_pos=%s, raw=%s)",
-                uid,
-                state.pending_target,
-                getattr(state, "last_hub_pos", None),
-                raw,
-            )
-            return state.pending_target
-
-        if state and state.last_hub_pos is not None:
-            _LOGGER.debug(
-                "pos_debug: get_effective_position uid=%s -> last_hub_pos=%s (in_motion=%s, pending=%s, raw=%s)",
-                uid,
-                state.last_hub_pos,
-                getattr(state, "in_motion", None),
-                getattr(state, "pending_target", None),
-                raw,
-            )
-            return state.last_hub_pos
-
-        _LOGGER.debug(
-            "pos_debug: get_effective_position uid=%s -> raw=%s (no state or no motion)",
-            uid,
-            raw,
-        )
-        try:
-            return int(raw) if raw is not None else None
-        except (TypeError, ValueError):
-            return None
-
-    # --- command / verify / long-poll ---
+    # --- commands -------------------------------------------------------------
 
     def register_command(self, uid: str, target: int) -> int:
-        """Record latest command for a shade and start watcher + verify timer."""
-        uid_s = str(uid)
-        self._cmd_seq += 1
-        cid = self._cmd_seq
+        """Record that ``uid`` was told to move to ``target``; returns the command id.
+
+        Starts the notification watcher (once per hub) and, if enabled,
+        schedules the verify-and-retry check.
+        """
+        uid = str(uid)
+        target = int(target)
         now = time.monotonic()
-        target_i = int(target)
-        self._last_cmd[uid_s] = {"id": cid, "target": target_i, "t": now}
+        self._cmd_seq += 1
+        cmd_id = self._cmd_seq
+        self._last_cmd_id[uid] = cmd_id
 
-        state = self._motion.get(uid_s)
-        if state is None:
-            state = self._motion[uid_s] = ShadeMotionState()
-
-        # Baseline for this command: where did the hub think we were when we started?
+        state = self._motion.setdefault(uid, ShadeMotionState())
         state.start_pos = state.last_hub_pos
         state.saw_move_since_cmd = False
-
         state.in_motion = True
-        state.pending_target = target_i
+        state.pending_target = target
         state.last_control_ts = now
         state.retry_attempted = False
-        self._last_global_control_ts = now
+        self._last_control_ts = now
 
-        # Start long-poll watcher once per hub
         if self._notif_task is None or self._notif_task.done():
-            self._notif_task = self.hass.async_create_task(self._notification_watch())
+            self._notif_task = self.config_entry.async_create_background_task(
+                self.hass, self._notification_watch(), name=f"{DOMAIN} notification watch"
+            )
 
-        # Schedule verify/retry if enabled
-        ce = getattr(self, "config_entry", None)
-        verify_enabled = DEFAULT_VERIFY_ENABLED
-        verify_delay = DEFAULT_VERIFY_DELAY
-        try:
-            if ce is not None:
-                opts = ce.options
-                verify_enabled = bool(opts.get("verify_enabled", DEFAULT_VERIFY_ENABLED))
-                verify_delay = float(opts.get("verify_delay_sec", DEFAULT_VERIFY_DELAY))
-        except Exception:
-            pass
-
-        if verify_enabled and verify_delay > 0:
-            self.hass.async_create_task(self.async_verify_and_retry(uid_s, target_i, delay=verify_delay, cmd_id=cid))
-
-        return cid
+        if self.options.verify_enabled and self.options.verify_delay_sec > 0:
+            self.config_entry.async_create_background_task(
+                self.hass,
+                self.async_verify_and_retry(uid, target, delay=self.options.verify_delay_sec, cmd_id=cmd_id),
+                name=f"{DOMAIN} verify {uid}",
+            )
+        return cmd_id
 
     async def _notification_watch(self) -> None:
-        """Run long-poll cycles until all moving shades reach their targets or timeout."""
+        """Long-poll the hub while any shade is pending, re-reading status on events."""
         try:
-            spacing = getattr(self.api, "send_spacing_sec", 0.5)
-            # Small arming delay so both /control posts go out before any status read
-            await asyncio.sleep(float(spacing) + 0.2)
+            # Let a burst of /control posts go out before the first status read.
+            await asyncio.sleep(self.api.send_spacing_sec + 0.2)
 
             while self._pending_uids():
-                # 2-minute failsafe from last control
-                now_mono = time.monotonic()
-                if self._last_global_control_ts is not None and now_mono - self._last_global_control_ts > 120.0:
-                    self.logger.warning(
-                        "long-poll: >120s since last control; clearing motion state and stopping watcher"
+                if self._last_control_ts is not None and time.monotonic() - self._last_control_ts > MOTION_FAILSAFE_SEC:
+                    _LOGGER.warning(
+                        "No settle seen %.0fs after the last command; clearing motion state", MOTION_FAILSAFE_SEC
                     )
-                    for st in self._motion.values():
-                        if st.in_motion:
-                            st.in_motion = False
-                            st.pending_target = None
-                    # Force a fresh status so UI matches the hub
+                    for state in self._motion.values():
+                        if state.in_motion:
+                            state.mark_settled()
                     await self.async_request_refresh()
                     break
 
-                # If the cached status already shows we're done (e.g. due to base 30s poll), exit.
-                if self._prune_pending_with_cache():
-                    self.logger.debug("long-poll: pending cleared per cached status, stopping")
+                if self._settle_from_cache():
                     break
 
-                ce = getattr(self, "config_entry", None)
+                self._notif_ts = max(self._notif_ts, int(time.time()) - 1)
                 try:
-                    timeout = (
-                        float(ce.options.get("notification_timeout_sec", DEFAULT_NOTIFICATION_TIMEOUT))
-                        if ce
-                        else float(DEFAULT_NOTIFICATION_TIMEOUT)
+                    raw = await self.api.notification(
+                        timestamp=self._notif_ts, hold_sec=self.options.notification_timeout_sec
                     )
-                except Exception:
-                    timeout = float(DEFAULT_NOTIFICATION_TIMEOUT)
-
-                # Make sure our watermark doesn't go backwards
-                now_s = int(time.time())
-                if self._notif_ts < now_s - 1:
-                    self._notif_ts = now_s
-
-                self.logger.debug("long-poll: hold %.2fs from ts=%s", timeout, self._notif_ts)
-
-                try:
-                    raw = await self.api.notification(timestamp=self._notif_ts, hold_sec=timeout)
-                except asyncio.CancelledError:
-                    raise
-                except Exception:
-                    self.logger.exception("long-poll: notification() failed; will retry while any shade is pending")
+                except ShadeAutoError as err:
+                    _LOGGER.debug("notification failed (%s); retrying while shades are pending", err)
                     await asyncio.sleep(1.0)
                     continue
 
-                if isinstance(raw, str) and raw.strip():
-                    text = raw.strip()
-                    for chunk in re.split(r"}\s*{", text):
-                        if not chunk:
-                            continue
-                        if not chunk.startswith("{"):
-                            chunk = "{" + chunk
-                        if not chunk.endswith("}"):
-                            chunk = chunk + "}"
-                        try:
-                            obj = json.loads(chunk)
-                        except Exception:
-                            continue
-
-                        # advance watermark
-                        ts_val = obj.get("Status") or obj.get("Timestamp")
-                        if isinstance(ts_val, (int, float)):
-                            if ts_val > 10_000_000_000:
-                                ts_val = int(ts_val / 1000)
-                            self._notif_ts = int(ts_val)
-
-                        # handle events
-                        plist = obj.get("PeripheralList")
-                        if isinstance(plist, list) and plist:
-                            pending = set(self._pending_uids())
-                            if any(str(uid) in pending for uid in plist):
-                                # Reread full status and update cache + motion state
-                                status = await self.api.status()
-                                by_uid = self._build_status_by_uid(status)
-                                # Push into coordinator data for immediate UI update
-                                current = dict(self.data or {})
-                                current.setdefault("thing_name", self.api.thing_name)
-                                current.setdefault("peripherals", self._peripherals)
-                                current["status"] = by_uid
-                                self.async_set_updated_data(current)
-                # Normal: loop again until pending clears or failsafe fires
-
-            self.logger.info("long-poll: all commanded shades settled; stopping watcher")
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            self.logger.exception("long-poll watcher error")
+                if raw.strip():
+                    await self._handle_notification(raw.strip())
+            _LOGGER.debug("All commanded shades settled; notification watch stopped")
         finally:
             self._notif_task = None
 
-    async def async_verify_and_retry(
-        self,
-        uid: str,
-        target: int,
-        *,
-        prev: int | None = None,
-        moved_threshold: int = 1,
-        delay: float = 20.0,
-        cmd_id: int | None = None,
-    ) -> None:
-        """Retry once only if this command is still latest and shade isn't at target."""
-        uid_s = str(uid)
-        latest = self._last_cmd.get(uid_s)
-        if cmd_id is not None and (latest is None or latest.get("id") != cmd_id):
-            return
+    async def _handle_notification(self, text: str) -> None:
+        """Parse one or more notification objects and refresh status if they concern us."""
+        for chunk in _JSON_OBJECT_BOUNDARY.split(text):
+            if not chunk:
+                continue
+            if not chunk.startswith("{"):
+                chunk = "{" + chunk
+            if not chunk.endswith("}"):
+                chunk = chunk + "}"
+            try:
+                event = json.loads(chunk)
+            except ValueError:
+                _LOGGER.debug("Ignoring unparsable notification chunk: %s", chunk[:200])
+                continue
 
+            ts_val = event.get("Status") or event.get("Timestamp")
+            if isinstance(ts_val, (int, float)):
+                if ts_val > _MILLISECOND_THRESHOLD:
+                    ts_val = ts_val / 1000
+                self._notif_ts = int(ts_val)
+
+            peripherals = event.get("PeripheralList")
+            if not isinstance(peripherals, list):
+                continue
+            pending = set(self._pending_uids())
+            if any(str(uid) in pending for uid in peripherals):
+                status = await self.api.status()
+                self.async_set_updated_data({"status": self._build_status_by_uid(status)})
+
+    async def async_verify_and_retry(self, uid: str, target: int, *, delay: float, cmd_id: int) -> None:
+        """After ``delay``, resend the command once if ``uid`` is not at ``target``.
+
+        Does nothing if a newer command for the same shade has been issued.
+        """
+        uid = str(uid)
+        if self._last_cmd_id.get(uid) != cmd_id:
+            return
         await asyncio.sleep(max(0.1, delay))
-
-        latest = self._last_cmd.get(uid_s)
-        if cmd_id is not None and (latest is None or latest.get("id") != cmd_id):
+        if self._last_cmd_id.get(uid) != cmd_id:
             return
 
-        # Quick check from motion state first
-        state = self._motion.get(uid_s)
-        if (
-            state
-            and state.pending_target is not None
-            and state.last_hub_pos is not None
-            and abs(state.last_hub_pos - state.pending_target) <= 2
-        ):
+        state = self._motion.get(uid)
+        if state and state.last_hub_pos is not None and state.is_at_target(state.last_hub_pos):
             return
 
-        # Fallback to cached status for the UID
         await self.async_request_refresh()
-        st = (self.data or {}).get("status", {}).get(uid_s, {})
-        pos_raw = st.get("BottomRailPosition")
+        pos = to_int(self.status_for(uid).get(ATTR_BOTTOM_RAIL))
+        if pos is not None and abs(pos - target) <= POSITION_TOLERANCE:
+            return
+        if self._last_cmd_id.get(uid) != cmd_id:
+            return
+
+        _LOGGER.debug("UID %s not at %s after %.0fs (hub reports %s); retrying once", uid, target, delay, pos)
+        state = self._motion.setdefault(uid, ShadeMotionState())
+        state.retry_attempted = True
+        state.last_control_ts = time.monotonic()
+        self._last_control_ts = state.last_control_ts
         try:
-            pos = int(pos_raw) if pos_raw is not None else None
-        except (TypeError, ValueError):
-            pos = None
-            state = getattr(self, "_motion", {}).get(uid_s)
-            _LOGGER.debug(
-                "pos_debug_1: verify uid=%s state_before_retry in_motion=%s pending=%s last_hub_pos=%s",
-                uid_s,
-                getattr(state, "in_motion", None),
-                getattr(state, "pending_target", None),
-                getattr(state, "last_hub_pos", None),
-            )
-        if (pos is None or abs(pos - int(target)) > 2) and latest and latest.get("id") == cmd_id:
-            self.logger.debug(
-                "verify_and_retry: UID %s not at target after %.1fs (pos=%s, want=%s) -> retry",
-                uid_s,
-                delay,
-                pos,
-                target,
-            )
-            # Mark as retried and send one more control
-            state = self._motion.setdefault(uid_s, ShadeMotionState())
-            state2 = getattr(self, "_motion", {}).get(uid_s)
-            _LOGGER.debug(
-                "pos_debug_2: verify uid=%s state_before_retry in_motion=%s pending=%s last_hub_pos=%s",
-                uid_s,
-                getattr(state2, "in_motion", None),
-                getattr(state2, "pending_target", None),
-                getattr(state2, "last_hub_pos", None),
-            )
-            state.retry_attempted = True
-            state.last_control_ts = time.monotonic()
-            self._last_global_control_ts = state.last_control_ts
-            await self.api.control(uid_s, bottom=int(target))
-            state = getattr(self, "_motion", {}).get(uid_s)
-            _LOGGER.debug(
-                "pos_debug_3: verify uid=%s state_before_retry in_motion=%s pending=%s last_hub_pos=%s",
-                uid_s,
-                getattr(state, "in_motion", None),
-                getattr(state, "pending_target", None),
-                getattr(state, "last_hub_pos", None),
-            )
-            await self.async_request_refresh()
-            state = getattr(self, "_motion", {}).get(uid_s)
-            _LOGGER.debug(
-                "pos_debug_4: verify uid=%s state_before_retry in_motion=%s pending=%s last_hub_pos=%s",
-                uid_s,
-                getattr(state, "in_motion", None),
-                getattr(state, "pending_target", None),
-                getattr(state, "last_hub_pos", None),
-            )
+            await self.api.control(uid, bottom=target)
+        except ShadeAutoError as err:
+            _LOGGER.warning("Retry for UID %s failed: %s", uid, err)
+            return
+        await self.async_request_refresh()

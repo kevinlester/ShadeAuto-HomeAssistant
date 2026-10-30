@@ -1,103 +1,126 @@
+"""Config, reconfigure and options flows."""
+
 from __future__ import annotations
 
 from typing import Any
 
-from homeassistant import config_entries
+from homeassistant.config_entries import (
+    ConfigEntry,
+    ConfigFlow,
+    ConfigFlowResult,
+    OptionsFlowWithReload,
+)
 from homeassistant.core import callback
-from homeassistant.data_entry_flow import FlowResult
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
-from homeassistant.helpers.selector import selector
-import voluptuous as vol
+from homeassistant.helpers.selector import (
+    BooleanSelector,
+    NumberSelector,
+    NumberSelectorConfig,
+    NumberSelectorMode,
+    TextSelector,
+)
+from probatio import Optional, Required, Schema
 
-from .api import ShadeAutoApi
+from .api import ShadeAutoApi, ShadeAutoError
 from .const import (
+    CONF_ESTIMATION_ENABLED,
+    CONF_FULL_TRAVEL_TIME_SEC,
     CONF_HOST,
-    DEFAULT_ESTIMATION_ENABLED,
-    DEFAULT_FULL_TRAVEL_TIME,
-    DEFAULT_LOW_BATT,
-    DEFAULT_NOTIFICATION_TIMEOUT,
-    DEFAULT_POLL,
-    DEFAULT_SEND_SPACING,
-    DEFAULT_VERIFY_DELAY,
-    DEFAULT_VERIFY_ENABLED,
+    CONF_LOW_BATTERY_THRESHOLD,
+    CONF_NOTIFICATION_TIMEOUT_SEC,
+    CONF_POLL_SECONDS,
+    CONF_SEND_SPACING_SEC,
+    CONF_VERIFY_DELAY_SEC,
+    CONF_VERIFY_ENABLED,
     DOMAIN,
 )
+from .options import ShadeAutoOptions
 
-STEP_USER = vol.Schema({vol.Required(CONF_HOST): str})
+HOST_SCHEMA = Schema({Required(CONF_HOST): TextSelector()})
 
 
-class ShadeAutoConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
+def _unique_id(host: str) -> str:
+    return f"shadeauto_{host}"
+
+
+def _seconds(minimum: float, maximum: float, step: float = 1, *, box: bool = False) -> NumberSelector:
+    mode = NumberSelectorMode.BOX if box else NumberSelectorMode.SLIDER
+    return NumberSelector(NumberSelectorConfig(min=minimum, max=maximum, step=step, unit_of_measurement="s", mode=mode))
+
+
+class ShadeAutoConfigFlow(ConfigFlow, domain=DOMAIN):
+    """Add a hub by host name or IP."""
+
     VERSION = 1
-
-    async def async_step_user(self, user_input: dict[str, Any] | None = None) -> FlowResult:
-        errors: dict[str, str] = {}
-        if user_input is not None:
-            host = user_input[CONF_HOST]
-            api = ShadeAutoApi(host, async_get_clientsession(self.hass))
-            try:
-                await api.registration()
-            except Exception:
-                errors["base"] = "cannot_connect"
-            else:
-                await self.async_set_unique_id(f"shadeauto_{host}")
-                self._abort_if_unique_id_configured()
-                return self.async_create_entry(title=f"ShadeAuto ({host})", data={CONF_HOST: host})
-
-        return self.async_show_form(step_id="user", data_schema=STEP_USER, errors=errors)
 
     @staticmethod
     @callback
-    def async_get_options_flow(config_entry):
-        return ShadeAutoOptionsFlow(config_entry)
+    def async_get_options_flow(config_entry: ConfigEntry) -> ShadeAutoOptionsFlow:
+        return ShadeAutoOptionsFlow()
+
+    async def _async_can_connect(self, host: str) -> bool:
+        api = ShadeAutoApi(host, async_get_clientsession(self.hass))
+        try:
+            await api.registration()
+        except ShadeAutoError:
+            return False
+        return True
+
+    async def async_step_user(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
+        errors: dict[str, str] = {}
+        if user_input is not None:
+            host = user_input[CONF_HOST].strip()
+            await self.async_set_unique_id(_unique_id(host))
+            self._abort_if_unique_id_configured()
+            if await self._async_can_connect(host):
+                return self.async_create_entry(title=f"ShadeAuto ({host})", data={CONF_HOST: host})
+            errors["base"] = "cannot_connect"
+        return self.async_show_form(step_id="user", data_schema=HOST_SCHEMA, errors=errors)
+
+    async def async_step_reconfigure(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
+        """Change the hub's host, e.g. after it got a new IP address."""
+        entry = self._get_reconfigure_entry()
+        errors: dict[str, str] = {}
+        if user_input is not None:
+            host = user_input[CONF_HOST].strip()
+            new_unique_id = _unique_id(host)
+            if any(
+                other.unique_id == new_unique_id and other.entry_id != entry.entry_id
+                for other in self._async_current_entries(include_ignore=False)
+            ):
+                return self.async_abort(reason="already_configured")
+            if await self._async_can_connect(host):
+                return self.async_update_reload_and_abort(
+                    entry,
+                    unique_id=new_unique_id,
+                    title=f"ShadeAuto ({host})",
+                    data_updates={CONF_HOST: host},
+                )
+            errors["base"] = "cannot_connect"
+        schema = self.add_suggested_values_to_schema(HOST_SCHEMA, {CONF_HOST: entry.data.get(CONF_HOST, "")})
+        return self.async_show_form(step_id="reconfigure", data_schema=schema, errors=errors)
 
 
-class ShadeAutoOptionsFlow(config_entries.OptionsFlow):
-    def __init__(self, entry: config_entries.ConfigEntry) -> None:
-        self.entry = entry
+class ShadeAutoOptionsFlow(OptionsFlowWithReload):
+    """Tuning options; the entry reloads automatically when they change."""
 
-    async def async_step_init(self, user_input: dict[str, Any] | None = None) -> FlowResult:
-        current_host = self.entry.data.get(CONF_HOST, "")
-        schema = vol.Schema(
+    async def async_step_init(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
+        if user_input is not None:
+            return self.async_create_entry(data=user_input)
+
+        current = ShadeAutoOptions.from_mapping(self.config_entry.options)
+        schema = Schema(
             {
-                vol.Optional("host", default=current_host): selector({"text": {}}),
-                vol.Optional("poll_seconds", default=self.entry.options.get("poll_seconds", DEFAULT_POLL)): selector(
-                    {"number": {"min": 5, "max": 120, "step": 1, "unit_of_measurement": "s", "mode": "box"}}
+                Optional(CONF_POLL_SECONDS, default=current.poll_seconds): _seconds(5, 120, box=True),
+                Optional(CONF_LOW_BATTERY_THRESHOLD, default=current.low_battery_threshold): NumberSelector(
+                    NumberSelectorConfig(min=5, max=50, step=1, unit_of_measurement="%")
                 ),
-                vol.Optional(
-                    "low_battery_threshold", default=self.entry.options.get("low_battery_threshold", DEFAULT_LOW_BATT)
-                ): selector({"number": {"min": 5, "max": 50, "step": 1, "unit_of_measurement": "%"}}),
-                vol.Optional(
-                    "send_spacing_sec", default=self.entry.options.get("send_spacing_sec", DEFAULT_SEND_SPACING)
-                ): selector({"number": {"min": 0.15, "max": 1.0, "step": 0.05, "unit_of_measurement": "s"}}),
-                vol.Optional(
-                    "verify_enabled", default=self.entry.options.get("verify_enabled", DEFAULT_VERIFY_ENABLED)
-                ): selector({"boolean": {}}),
-                vol.Optional(
-                    "verify_delay_sec", default=self.entry.options.get("verify_delay_sec", DEFAULT_VERIFY_DELAY)
-                ): selector({"number": {"min": 1, "max": 60, "step": 1, "unit_of_measurement": "s"}}),
-                vol.Optional(
-                    "notification_timeout_sec",
-                    default=self.entry.options.get("notification_timeout_sec", DEFAULT_NOTIFICATION_TIMEOUT),
-                ): selector({"number": {"min": -1, "max": 10, "step": 1, "unit_of_measurement": "s"}}),
-                vol.Optional(
-                    "estimation_enabled",
-                    default=self.entry.options.get("estimation_enabled", DEFAULT_ESTIMATION_ENABLED),
-                ): selector({"boolean": {}}),
-                vol.Optional(
-                    "full_travel_time_sec",
-                    default=self.entry.options.get("full_travel_time_sec", DEFAULT_FULL_TRAVEL_TIME),
-                ): selector({"number": {"min": 5, "max": 120, "step": 1, "unit_of_measurement": "s"}}),
+                Optional(CONF_SEND_SPACING_SEC, default=current.send_spacing_sec): _seconds(0.15, 1.0, 0.05),
+                Optional(CONF_VERIFY_ENABLED, default=current.verify_enabled): BooleanSelector(),
+                Optional(CONF_VERIFY_DELAY_SEC, default=current.verify_delay_sec): _seconds(1, 60),
+                Optional(CONF_NOTIFICATION_TIMEOUT_SEC, default=current.notification_timeout_sec): _seconds(-1, 10),
+                Optional(CONF_ESTIMATION_ENABLED, default=current.estimation_enabled): BooleanSelector(),
+                Optional(CONF_FULL_TRAVEL_TIME_SEC, default=current.full_travel_time_sec): _seconds(5, 120),
             }
         )
-        if user_input is not None:
-            # If host changed, update entry.data and reload
-            new_host = user_input.get("host", current_host)
-            if new_host and new_host != current_host:
-                new_data = {**self.entry.data, CONF_HOST: new_host}
-                self.hass.config_entries.async_update_entry(self.entry, data=new_data)
-                await self.hass.config_entries.async_reload(self.entry.entry_id)
-            # Store the rest as options
-            opts = dict(user_input)
-            opts.pop("host", None)
-            return self.async_create_entry(title="", data=opts)
         return self.async_show_form(step_id="init", data_schema=schema)

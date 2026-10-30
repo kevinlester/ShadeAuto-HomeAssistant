@@ -6,25 +6,49 @@
         "data": {
           "host": "Hub IP / Hostname"
         }
+      },
+      "reconfigure": {
+        "title": "Change hub address",
+        "data": {
+          "host": "Hub IP / Hostname"
+        }
       }
+    },
+    "error": {
+      "cannot_connect": "Could not reach a ShadeAuto hub at that address."
+    },
+    "abort": {
+      "already_configured": "This hub is already configured.",
+      "reconfigure_successful": "Hub address updated."
     }
   },
   "options": {
     "step": {
       "init": {
         "title": "ShadeAuto options",
-        "description": "Tuning for pacing, verification, and polling.",
+        "description": "Tuning for pacing, verification, and polling. Changes apply immediately.",
         "data": {
-          "host": "Hub IP / Hostname",
           "poll_seconds": "Poll interval (seconds)",
           "low_battery_threshold": "Low battery threshold (%)",
-          "send_spacing_sec": "Min time between shade commands (s)",
-          "verify_enabled": "Verify & retry once if needed",
-          "verify_delay_sec": "Seconds to wait before verifing shade is in desired position (and retrying if not)",
+          "send_spacing_sec": "Minimum time between shade commands (s)",
+          "verify_enabled": "Verify the shade arrived and retry once if not",
+          "verify_delay_sec": "Seconds to wait before verifying",
           "notification_timeout_sec": "Notification hold timeout (seconds; -1 for infinite)",
-          "estimation_enabled": "Enable time-based position & state estimation",
-          "full_travel_time_sec": "Estimated time to fully open (seconds)"
+          "estimation_enabled": "Animate the position slider while a shade is moving",
+          "full_travel_time_sec": "Time for a full open or close (seconds)"
         }
+      }
+    }
+  },
+  "entity": {
+    "sensor": {
+      "battery": {
+        "name": "Battery"
+      }
+    },
+    "binary_sensor": {
+      "battery_low": {
+        "name": "Battery low"
       }
     }
   }

@@ -75,12 +75,17 @@ class FakeHub:
         self.offline = False
         self.status_calls = 0
         self._last_controlled: int | None = None
+        self._mocker = mocker
+        self.add_host(HOST)
 
-        mocker.post(f"{BASE}/registration", side_effect=self._registration)
-        mocker.post(f"{BASE}/GetAllPeripheral", side_effect=self._get_all_peripheral)
-        mocker.post(f"{BASE}/status", side_effect=self._status)
-        mocker.post(f"{BASE}/control", side_effect=self._control)
-        mocker.post(f"{BASE}/notification", side_effect=self._notification)
+    def add_host(self, host: str) -> None:
+        """Answer on another host as well (reconfigure tests move the hub)."""
+        base = f"http://{host}:10123/NM/v1"
+        self._mocker.post(f"{base}/registration", side_effect=self._registration)
+        self._mocker.post(f"{base}/GetAllPeripheral", side_effect=self._get_all_peripheral)
+        self._mocker.post(f"{base}/status", side_effect=self._status)
+        self._mocker.post(f"{base}/control", side_effect=self._control)
+        self._mocker.post(f"{base}/notification", side_effect=self._notification)
 
     # ----- helpers for tests -----
 

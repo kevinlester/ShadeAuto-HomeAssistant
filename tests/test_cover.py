@@ -22,8 +22,8 @@ OFFICE_ENTITY = f"cover.shade_{OFFICE}"
 
 async def _call(hass: HomeAssistant, service: str, entity_id: str, **data: int) -> None:
     await hass.services.async_call(COVER_DOMAIN, service, {ATTR_ENTITY_ID: entity_id, **data}, blocking=True)
-    # Let the coordinator's follow-up status reads finish.
-    await hass.async_block_till_done()
+    # The notification watcher runs as a background task; wait for its status re-read.
+    await hass.async_block_till_done(wait_background_tasks=True)
 
 
 async def test_set_position_sends_bottom_rail_only(

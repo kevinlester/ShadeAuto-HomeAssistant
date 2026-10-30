@@ -4,16 +4,24 @@ from __future__ import annotations
 
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
+import pytest
 
-from custom_components.shadeauto.api import ShadeAutoApi
+from custom_components.shadeauto.api import ShadeAutoApi, ShadeAutoConnectionError
 
 from .conftest import BOTTOM, HOST, KITCHEN, FakeHub
 
 
 def _api(hass: HomeAssistant) -> ShadeAutoApi:
-    api = ShadeAutoApi(HOST, async_get_clientsession(hass))
-    api.send_spacing_sec = 0.0
-    return api
+    return ShadeAutoApi(HOST, async_get_clientsession(hass), send_spacing_sec=0.0)
+
+
+async def test_transport_errors_become_connection_errors(hass: HomeAssistant, hub: FakeHub) -> None:
+    hub.offline = True
+    api = _api(hass)
+    with pytest.raises(ShadeAutoConnectionError):
+        await api.status()
+    with pytest.raises(ShadeAutoConnectionError):
+        await api.control(KITCHEN, bottom=10)
 
 
 async def test_registration_learns_the_thing_name(hass: HomeAssistant, hub: FakeHub) -> None:

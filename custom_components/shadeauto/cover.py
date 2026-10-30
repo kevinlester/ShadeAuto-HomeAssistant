@@ -1,256 +1,164 @@
+"""Cover entities: one per shade, driving the bottom rail.
+
+The hub reports a shade's position only after it has moved, so while a
+command is in flight the entity interpolates the slider from the last known
+position to the target over ``full_travel_time_sec`` ("estimation"). The
+coordinator's view wins whenever estimation is off or has no active move.
+"""
+
 from __future__ import annotations
 
 import asyncio
 import logging
 import time
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from homeassistant.components.cover import (
-    CoverEntity,
-    CoverEntityFeature,
-)
-from homeassistant.config_entries import ConfigEntry
+from homeassistant.components.cover import ATTR_POSITION, CoverEntity, CoverEntityFeature
 from homeassistant.core import HomeAssistant
-from homeassistant.helpers.entity import DeviceInfo
-from homeassistant.helpers.entity_platform import AddEntitiesCallback
-from homeassistant.helpers.update_coordinator import CoordinatorEntity
+from homeassistant.exceptions import HomeAssistantError
+from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
+from .api import ShadeAutoError
 from .const import DOMAIN
 from .coordinator import ShadeAutoCoordinator
+from .entity import ShadeAutoEntity
+
+if TYPE_CHECKING:
+    from . import ShadeAutoConfigEntry
 
 _LOGGER = logging.getLogger(__name__)
 
-
-async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, add_entities: AddEntitiesCallback):
-    data = hass.data[DOMAIN][entry.entry_id]
-    coord: ShadeAutoCoordinator = data["coordinator"]
-    entities: list[ShadeAutoCover] = []
-    for uid, meta in coord.peripherals.items():
-        name = meta.get("name", f"Shade {uid}")
-        entities.append(ShadeAutoCover(coord, entry, uid, name))
-    add_entities(entities)
+# Slider animation refresh bounds: fast enough to look smooth, slow enough not to flood the state machine.
+_ANIMATION_MIN_INTERVAL = 0.1
+_ANIMATION_MAX_INTERVAL = 0.5
+_ANIMATION_FRAMES = 20
 
 
-class ShadeAutoCover(CoordinatorEntity[ShadeAutoCoordinator], CoverEntity):
-    _attr_should_poll = False
+async def async_setup_entry(
+    hass: HomeAssistant, entry: ShadeAutoConfigEntry, async_add_entities: AddConfigEntryEntitiesCallback
+) -> None:
+    coordinator = entry.runtime_data.coordinator
+    async_add_entities(ShadeAutoCover(coordinator, uid) for uid in coordinator.peripherals)
+
+
+class ShadeAutoCover(ShadeAutoEntity, CoverEntity):
+    """A shade's bottom rail as a Home Assistant cover."""
+
+    _attr_name = None  # the main entity carries the device name
     _attr_supported_features = CoverEntityFeature.OPEN | CoverEntityFeature.CLOSE | CoverEntityFeature.SET_POSITION
 
-    def __init__(self, coordinator: ShadeAutoCoordinator, entry: ConfigEntry, uid: str, name: str) -> None:
-        super().__init__(coordinator)
-        self._uid = str(uid)
-        self._entry = entry
-        self._attr_name = name
-
-        thing = coordinator.data.get("thing_name") or coordinator.api.host
-        self._attr_unique_id = f"shadeauto_{thing}_{uid}"
-
-        # UI estimation state
+    def __init__(self, coordinator: ShadeAutoCoordinator, uid: str) -> None:
+        super().__init__(coordinator, uid)
+        # Estimation of the current move: start position, target, start time, duration.
         self._est_start_pos: float | None = None
         self._est_target: float | None = None
         self._est_start_ts: float | None = None
         self._est_travel_time_s: float | None = None
+        self._anim_task: asyncio.Task[None] | None = None
+        self._removed = False
 
-        # animation task for smooth slider
-        self._anim_task: asyncio.Task | None = None
+    async def async_will_remove_from_hass(self) -> None:
+        self._removed = True
+        self._cancel_animation()
+        await super().async_will_remove_from_hass()
 
-    @property
-    def device_info(self) -> DeviceInfo:
-        host = self.coordinator.api.host
-        return DeviceInfo(
-            identifiers={(DOMAIN, f"shade_{host}_{self._uid}")},
-            via_device=(DOMAIN, f"hub_{host}"),
-            name=self.name,
-            manufacturer="Norman (ShadeAuto)",
-            model=str(self.coordinator.peripherals.get(self._uid, {}).get("module_detail") or "Shade"),
-        )
+    # --- estimation ---------------------------------------------------------
 
-    def _status_for_uid(self) -> dict[str, Any]:
-        return self.coordinator.data.get("status", {}).get(self._uid, {})
-
-    @property
-    def available(self) -> bool:
-        return self._uid in self.coordinator.data.get("status", {})
-
-    # --- estimation helpers ---
-
-    def _estimation_config(self) -> tuple[bool, float]:
-        """Read estimation settings from options (or defaults)."""
-        from .const import DEFAULT_ESTIMATION_ENABLED, DEFAULT_FULL_TRAVEL_TIME
-
-        est_enabled = DEFAULT_ESTIMATION_ENABLED
-        full_time = DEFAULT_FULL_TRAVEL_TIME
-        try:
-            opts = self._entry.options
-            est_enabled = bool(opts.get("estimation_enabled", DEFAULT_ESTIMATION_ENABLED))
-            full_time = float(opts.get("full_travel_time_sec", DEFAULT_FULL_TRAVEL_TIME))
-        except Exception:
-            pass
-        return est_enabled, full_time
+    def _estimation_active(self) -> bool:
+        """True while estimation is enabled and a move is still being interpolated."""
+        if not self.coordinator.options.estimation_enabled:
+            return False
+        if self._est_start_pos is None or self._est_target is None or self._est_start_ts is None:
+            return False
+        if self._est_travel_time_s is None or self._est_travel_time_s <= 0:
+            return False
+        return time.monotonic() - self._est_start_ts < self._est_travel_time_s
 
     def _current_estimated_position(self) -> int | None:
-        """Return an estimated position based on last command and elapsed time."""
-        est_enabled, _full_time = self._estimation_config()
-        now = time.monotonic()
-
-        if not est_enabled or self._est_start_pos is None or self._est_target is None or self._est_start_ts is None:
-            # Fall back to coordinator's effective position
-            _LOGGER.debug("current_estimated_position: uid=%s Fallback", self._uid)
-            try:
-                return self.coordinator.get_effective_position(self._uid)
-            except Exception:
-                st = self._status_for_uid()
-                raw = st.get("BottomRailPosition")
-                try:
-                    return int(raw) if raw is not None else None
-                except (TypeError, ValueError):
-                    return None
-
-        if self._est_travel_time_s is None or self._est_travel_time_s <= 0:
-            _LOGGER.debug("current_estimated_position: uid=%s No Travel Time", self._uid)
+        """Interpolated position during a move; the coordinator's value otherwise."""
+        if (
+            not self.coordinator.options.estimation_enabled
+            or self._est_start_pos is None
+            or self._est_target is None
+            or self._est_start_ts is None
+        ):
+            return self.coordinator.get_effective_position(self._uid)
+        if not self._est_travel_time_s or self._est_travel_time_s <= 0:
             return round(self._est_target)
-
-        dt = max(0.0, now - self._est_start_ts)
-        if dt >= self._est_travel_time_s:
-            _LOGGER.debug("current_estimated_position: uid=%s Complete Travel Time", self._uid)
+        elapsed = max(0.0, time.monotonic() - self._est_start_ts)
+        if elapsed >= self._est_travel_time_s:
             return round(self._est_target)
-
-        ratio = max(0.0, min(dt / self._est_travel_time_s, 1.0))
-        est = self._est_start_pos + (self._est_target - self._est_start_pos) * ratio
-        try:
-            _LOGGER.debug("current_estimated_position: uid=%s Estimate = %s", self._uid, est)
-            return round(est)
-        except (TypeError, ValueError):
-            return round(self._est_target)
+        ratio = min(elapsed / self._est_travel_time_s, 1.0)
+        return round(self._est_start_pos + (self._est_target - self._est_start_pos) * ratio)
 
     def _start_estimation_for_command(self, target: int) -> None:
-        """Start or update estimation state when a new command is issued."""
-        est_enabled, full_time = self._estimation_config()
-        if not est_enabled:
-            self._est_start_pos = None
-            self._est_target = None
-            self._est_start_ts = None
-            self._est_travel_time_s = None
+        """Begin interpolating toward ``target`` from wherever the shade is believed to be now."""
+        options = self.coordinator.options
+        if not options.estimation_enabled:
+            self._clear_estimation()
             return
 
         now = time.monotonic()
-
-        # Estimate starting position for this command: if we have an ongoing estimation, advance it;
-        # otherwise fall back to the last known position.
         start_pos: float | None = None
+        # A command issued mid-move starts from the interpolated position, not the old baseline.
         if (
             self._est_start_pos is not None
             and self._est_target is not None
             and self._est_start_ts is not None
             and self._est_travel_time_s
         ):
-            dt_prev = max(0.0, now - self._est_start_ts)
-            if self._est_travel_time_s > 0:
-                ratio_prev = max(0.0, min(dt_prev / self._est_travel_time_s, 1.0))
-                start_pos = self._est_start_pos + (self._est_target - self._est_start_pos) * ratio_prev
-
+            ratio_prev = min(max(0.0, now - self._est_start_ts) / self._est_travel_time_s, 1.0)
+            start_pos = self._est_start_pos + (self._est_target - self._est_start_pos) * ratio_prev
         if start_pos is None:
-            # Use the last effective position from the coordinator (or raw hub) as a baseline
-            try:
-                base = self.coordinator.get_effective_position(self._uid)
-            except Exception:
-                base = None
-            if base is None:
-                st = self._status_for_uid()
-                raw = st.get("BottomRailPosition")
-                try:
-                    base = int(raw) if raw is not None else 0
-                except (TypeError, ValueError):
-                    base = 0
-            start_pos = float(base)
-
-        target_i = int(target)
+            start_pos = float(self.coordinator.get_effective_position(self._uid) or 0)
 
         self._est_start_pos = start_pos
-        self._est_target = float(target_i)
+        self._est_target = float(target)
         self._est_start_ts = now
+        distance = abs(target - start_pos)
+        self._est_travel_time_s = options.full_travel_time_sec * distance / 100.0 if distance > 0 else 0.0
+        _LOGGER.debug("UID %s estimation: %.1f -> %s over %.1fs", self._uid, start_pos, target, self._est_travel_time_s)
 
-        distance = abs(target_i - start_pos)
-        if distance <= 0:
-            self._est_travel_time_s = 0.0
-        else:
-            self._est_travel_time_s = full_time * distance / 100.0
-
-        _LOGGER.debug(
-            "estimation: uid=%s start_pos=%.2f target=%s distance=%.2f full_time=%.2f travel_time_s=%.2f",
-            self._uid,
-            self._est_start_pos,
-            target_i,
-            distance,
-            full_time,
-            self._est_travel_time_s,
-        )
+    def _clear_estimation(self) -> None:
+        self._est_start_pos = None
+        self._est_target = None
+        self._est_start_ts = None
+        self._est_travel_time_s = None
 
     def _start_animation(self) -> None:
-        """Start or restart the smooth slider animation for this move."""
-        # Cancel any previous animation
+        """Restart the task that re-renders the slider during the estimated move."""
+        self._cancel_animation()
+        if not self._estimation_active():
+            return
+        self._anim_task = self.coordinator.config_entry.async_create_background_task(
+            self.hass, self._animate_slider(), name=f"{DOMAIN} slider {self._uid}"
+        )
+
+    def _cancel_animation(self) -> None:
         if self._anim_task and not self._anim_task.done():
             self._anim_task.cancel()
-
-        est_enabled, _ = self._estimation_config()
-        if (
-            not est_enabled
-            or self._est_start_ts is None
-            or self._est_travel_time_s is None
-            or self._est_travel_time_s <= 0
-        ):
-            self._anim_task = None
-            return
-
-        # Kick off an async loop to refresh the state a few times per second
-        self._anim_task = asyncio.create_task(self._animate_slider())
+        self._anim_task = None
 
     async def _animate_slider(self) -> None:
-        """Periodically refresh HA state so the slider moves smoothly."""
+        """Write state a few times per second until the estimated move completes."""
+        assert self._est_travel_time_s  # guaranteed by _start_animation
+        interval = max(
+            _ANIMATION_MIN_INTERVAL, min(_ANIMATION_MAX_INTERVAL, self._est_travel_time_s / _ANIMATION_FRAMES)
+        )
         try:
-            _LOGGER.debug("_animate_slider: uid=%s Starting", self._uid)
-            # Aim for ~10-20 updates over the travel window, but bound the interval
-            min_interval = 0.1
-            max_interval = 0.5
-            if self._est_travel_time_s is None or self._est_travel_time_s <= 0:
-                interval = 0.3
-            else:
-                interval = max(
-                    min_interval,
-                    min(max_interval, self._est_travel_time_s / 20.0),
-                )
-
-            while True:
-                # Push current estimated position & state to HA
+            while self._estimation_active():
+                self.async_write_ha_state()
+                await asyncio.sleep(interval)
+        finally:
+            if not self._removed:
+                # One last write so the slider ends exactly on the target.
                 self.async_write_ha_state()
 
-                # Stop if we no longer have an active estimation
-                if self._est_start_ts is None or self._est_travel_time_s is None or self._est_travel_time_s <= 0:
-                    break
-
-                dt = time.monotonic() - self._est_start_ts
-                if dt >= self._est_travel_time_s:
-                    # One last update at/near the target then exit
-                    break
-
-                await asyncio.sleep(interval)
-
-        except asyncio.CancelledError:
-            # New command started, animation replaced
-            pass
-        finally:
-            # Final state write to ensure we end exactly at the target estimate
-            self.async_write_ha_state()
-            self._anim_task = None
-            _LOGGER.debug("_animate_slider: uid=%s Finished", self._uid)
-
-    # --- core properties ---
+    # --- state ------------------------------------------------------------------
 
     @property
     def current_cover_position(self) -> int | None:
-        """Report the shade position, using time-based estimation when enabled."""
-        pos = self._current_estimated_position()
-        _LOGGER.debug("pos_debug: current_cover_position uid=%s -> %s", self._uid, pos)
-        return pos
+        return self._current_estimated_position()
 
     @property
     def is_closed(self) -> bool | None:
@@ -259,62 +167,37 @@ class ShadeAutoCover(CoordinatorEntity[ShadeAutoCoordinator], CoverEntity):
 
     @property
     def is_opening(self) -> bool | None:
-        est_enabled, _ = self._estimation_config()
-        if (
-            not est_enabled
-            or self._est_start_pos is None
-            or self._est_target is None
-            or self._est_start_ts is None
-            or self._est_travel_time_s is None
-        ):
+        if not self._estimation_active():
             return None
-        now = time.monotonic()
-        if now - self._est_start_ts >= self._est_travel_time_s:
-            return None
-        # target greater than start => opening
-        val = self._est_target > self._est_start_pos
-        return val
+        assert self._est_target is not None and self._est_start_pos is not None
+        return self._est_target > self._est_start_pos
 
     @property
     def is_closing(self) -> bool | None:
-        est_enabled, _ = self._estimation_config()
-        if (
-            not est_enabled
-            or self._est_start_pos is None
-            or self._est_target is None
-            or self._est_start_ts is None
-            or self._est_travel_time_s is None
-        ):
+        if not self._estimation_active():
             return None
-        now = time.monotonic()
-        if now - self._est_start_ts >= self._est_travel_time_s:
-            return None
-        # target less than start => closing
-        val = self._est_target < self._est_start_pos
-        return val
+        assert self._est_target is not None and self._est_start_pos is not None
+        return self._est_target < self._est_start_pos
 
-    # --- commands ---
+    # --- commands ---------------------------------------------------------------
 
-    async def async_set_cover_position(self, **kwargs) -> None:
-        pos = int(kwargs["position"])
-        self._start_estimation_for_command(pos)
-        self._start_animation()
-        self.async_write_ha_state()
-        await self.coordinator.api.control(self._uid, bottom=pos)
-        self.coordinator.register_command(self._uid, pos)
-
-    async def async_open_cover(self, **kwargs) -> None:
-        target = 100
+    async def _async_move_to(self, target: int) -> None:
+        """Send the bottom rail to ``target`` and start the optimistic UI update."""
+        target = max(0, min(100, int(target)))
         self._start_estimation_for_command(target)
         self._start_animation()
         self.async_write_ha_state()
-        await self.coordinator.api.control(self._uid, bottom=target)
+        try:
+            await self.coordinator.api.control(self._uid, bottom=target)
+        except ShadeAutoError as err:
+            raise HomeAssistantError(f"Could not send command to shade {self._uid}: {err}") from err
         self.coordinator.register_command(self._uid, target)
 
-    async def async_close_cover(self, **kwargs) -> None:
-        target = 0
-        self._start_estimation_for_command(target)
-        self._start_animation()
-        self.async_write_ha_state()
-        await self.coordinator.api.control(self._uid, bottom=target)
-        self.coordinator.register_command(self._uid, target)
+    async def async_set_cover_position(self, **kwargs: Any) -> None:
+        await self._async_move_to(kwargs[ATTR_POSITION])
+
+    async def async_open_cover(self, **kwargs: Any) -> None:
+        await self._async_move_to(100)
+
+    async def async_close_cover(self, **kwargs: Any) -> None:
+        await self._async_move_to(0)

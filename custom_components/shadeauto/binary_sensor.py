@@ -1,60 +1,43 @@
+"""Low-battery binary sensor, one per shade."""
+
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 from homeassistant.components.binary_sensor import BinarySensorDeviceClass, BinarySensorEntity
-from homeassistant.config_entries import ConfigEntry
+from homeassistant.const import EntityCategory
 from homeassistant.core import HomeAssistant
-from homeassistant.helpers.entity import DeviceInfo
-from homeassistant.helpers.entity_platform import AddEntitiesCallback
-from homeassistant.helpers.update_coordinator import CoordinatorEntity
+from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
-from .const import DOMAIN
+from .const import ATTR_BATTERY
 from .coordinator import ShadeAutoCoordinator
-from .sensor import _raw_to_percent
+from .entity import ShadeAutoEntity
+from .util import battery_percent
+
+if TYPE_CHECKING:
+    from . import ShadeAutoConfigEntry
 
 
-async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, add_entities: AddEntitiesCallback):
-    data = hass.data[DOMAIN][entry.entry_id]
-    coord: ShadeAutoCoordinator = data["coordinator"]
-
-    ents: list[ShadeAutoBatteryLow] = []
-    for uid, meta in coord.peripherals.items():
-        ents.append(ShadeAutoBatteryLow(coord, entry, uid, f"{meta.get('name', 'Shade')} Battery Low"))
-    add_entities(ents)
+async def async_setup_entry(
+    hass: HomeAssistant, entry: ShadeAutoConfigEntry, async_add_entities: AddConfigEntryEntitiesCallback
+) -> None:
+    coordinator = entry.runtime_data.coordinator
+    async_add_entities(ShadeAutoBatteryLow(coordinator, uid) for uid in coordinator.peripherals)
 
 
-class ShadeAutoBatteryLow(CoordinatorEntity[ShadeAutoCoordinator], BinarySensorEntity):
-    _attr_should_poll = False
+class ShadeAutoBatteryLow(ShadeAutoEntity, BinarySensorEntity):
+    """On when the battery is at or below the configured threshold."""
+
     _attr_device_class = BinarySensorDeviceClass.BATTERY
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _attr_translation_key = "battery_low"
 
-    def __init__(self, coordinator: ShadeAutoCoordinator, entry: ConfigEntry, uid: str, name: str) -> None:
-        super().__init__(coordinator)
-        self._entry = entry
-        self._uid = uid
-        self._attr_name = name
-        thing = coordinator.data.get("thing_name") or coordinator.api.host
-        self._attr_unique_id = f"shadeauto_{thing}_{uid}_battery_low"
-
-    @property
-    def available(self) -> bool:
-        return self._uid in self.coordinator.data.get("status", {})
-
-    @property
-    def device_info(self) -> DeviceInfo:
-        host = self.coordinator.api.host
-        return DeviceInfo(
-            identifiers={(DOMAIN, f"shade_{host}_{self._uid}")},
-            via_device=(DOMAIN, f"hub_{host}"),
-            name=self.coordinator.peripherals.get(self._uid, {}).get("name", "Shade"),
-            manufacturer="Norman (ShadeAuto)",
-            model=str(self.coordinator.peripherals.get(self._uid, {}).get("module_detail") or "Shade"),
-        )
+    def __init__(self, coordinator: ShadeAutoCoordinator, uid: str) -> None:
+        super().__init__(coordinator, uid, unique_id_suffix="_battery_low")
 
     @property
     def is_on(self) -> bool | None:
-        st = self.coordinator.data.get("status", {}).get(self._uid, {})
-        raw = st.get("BatteryVoltage")
-        pct = _raw_to_percent(raw)
-        if pct is None:
+        percent = battery_percent(self._status.get(ATTR_BATTERY))
+        if percent is None:
             return None
-        threshold = int(self._entry.options.get("low_battery_threshold", 20))
-        return pct <= threshold
+        return percent <= self.coordinator.options.low_battery_threshold

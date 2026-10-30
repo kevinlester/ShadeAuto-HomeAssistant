@@ -56,13 +56,22 @@ async def test_unload_entry(hass: HomeAssistant, integration: MockConfigEntry) -
     assert hass.states.get(f"cover.shade_{KITCHEN}").state == "unavailable"
 
 
-async def test_setup_does_not_load_when_hub_is_offline(
+async def test_setup_retries_when_hub_is_offline(
     hass: HomeAssistant, hub: FakeHub, config_entry: MockConfigEntry
 ) -> None:
-    """A hub that cannot be reached must not produce a loaded entry."""
+    """A hub that cannot be reached leaves the entry in retry, not in error."""
     hub.offline = True
     await hass.config_entries.async_setup(config_entry.entry_id)
     await hass.async_block_till_done()
 
-    assert config_entry.state is not ConfigEntryState.LOADED
+    assert config_entry.state is ConfigEntryState.SETUP_RETRY
     assert hass.states.get(f"cover.shade_{KITCHEN}") is None
+
+
+async def test_runtime_data_holds_api_and_coordinator(hass: HomeAssistant, integration: MockConfigEntry) -> None:
+    """Platforms reach the shared objects through entry.runtime_data."""
+    runtime = integration.runtime_data
+    assert runtime.api.host == HOST
+    assert runtime.coordinator.api is runtime.api
+    assert set(runtime.coordinator.peripherals) == {str(uid) for uid in ALL_UIDS}
+    assert runtime.coordinator.hub_device_id is not None

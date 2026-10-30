@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+from homeassistant.const import EntityCategory
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers import entity_registry as er
 import pytest
+from pytest_homeassistant_custom_component.common import MockConfigEntry
 
-from custom_components.shadeauto.sensor import _raw_to_percent
+from custom_components.shadeauto.util import battery_percent, to_int
 
 from .conftest import KITCHEN, FakeHub, make_entry, setup_integration
 
@@ -15,23 +18,41 @@ from .conftest import KITCHEN, FakeHub, make_entry, setup_integration
     [
         (None, None),
         ("not-a-number", None),
+        (True, None),
         (100, 100),
+        ("100", 100),
         (55.4, 55),
         (0, 0),
-        # The hub reports a percentage (the fixtures show ``BatteryVoltage: 100``),
-        # and the 0..100 branch runs first, so small floats are percentages too.
-        # The "cell voltage" branch in _raw_to_percent is therefore unreachable;
-        # these cases pin the current behaviour until that branch is removed.
-        (3.75, 4),
-        (4.5, 4),  # Python rounds half to even
-        (7, 7),
+        # The hub reports a percentage; anything outside 0-100 is unknown.
         (-1, None),
         (150, None),
     ],
 )
-def test_raw_to_percent(raw: object, expected: int | None) -> None:
-    """Values in 0..100 are percentages; anything else is unknown."""
-    assert _raw_to_percent(raw) == expected
+def test_battery_percent(raw: object, expected: int | None) -> None:
+    assert battery_percent(raw) == expected
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [(None, None), ("48", 48), (3, 3), (3.9, 3), ("x", None), (True, None), ([], None)],
+)
+def test_to_int(raw: object, expected: int | None) -> None:
+    assert to_int(raw) == expected
+
+
+async def test_battery_entities_are_diagnostic_and_named_after_the_shade(
+    hass: HomeAssistant, hub: FakeHub, integration: MockConfigEntry
+) -> None:
+    registry = er.async_get(hass)
+    battery = registry.async_get(f"sensor.shade_{KITCHEN}_battery")
+    assert battery is not None
+    assert battery.entity_category is EntityCategory.DIAGNOSTIC
+    assert hass.states.get(battery.entity_id).attributes["friendly_name"] == f"Shade {KITCHEN} Battery"
+
+    low = registry.async_get(f"binary_sensor.shade_{KITCHEN}_battery_low")
+    assert low is not None
+    assert low.entity_category is EntityCategory.DIAGNOSTIC
+    assert hass.states.get(low.entity_id).attributes["friendly_name"] == f"Shade {KITCHEN} Battery low"
 
 
 async def test_low_battery_uses_configured_threshold(hass: HomeAssistant, hub: FakeHub) -> None:
@@ -43,3 +64,13 @@ async def test_low_battery_uses_configured_threshold(hass: HomeAssistant, hub: F
 
     assert hass.states.get(f"sensor.shade_{KITCHEN}_battery").state == "25"
     assert hass.states.get(f"binary_sensor.shade_{KITCHEN}_battery_low").state == "on"
+
+
+async def test_unknown_battery_value_gives_unknown_states(hass: HomeAssistant, hub: FakeHub) -> None:
+    hub.shades[KITCHEN]["BatteryVoltage"] = "n/a"
+    entry = make_entry()
+    entry.add_to_hass(hass)
+    await setup_integration(hass, entry)
+
+    assert hass.states.get(f"sensor.shade_{KITCHEN}_battery").state == "unknown"
+    assert hass.states.get(f"binary_sensor.shade_{KITCHEN}_battery_low").state == "unknown"

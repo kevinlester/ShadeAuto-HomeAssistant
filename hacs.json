@@ -1,5 +1,6 @@
 {
   "name": "ShadeAuto (local)",
   "render_readme": true,
-  "country": "US"
+  "country": "US",
+  "homeassistant": "2026.10.0"
 }

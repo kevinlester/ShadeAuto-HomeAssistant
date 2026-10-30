@@ -26,7 +26,11 @@ Control Norman **ShadeAuto** shades locally via the hub’s undocumented HTTP AP
 - ShadeAuto hub reachable on your LAN (port **10123**).
 - Home Assistant 2024.6+ (tested).
 
+## Changing the hub address
+If your hub gets a new IP address, open Settings → *Devices & Services* → **ShadeAuto**, click the ⋯ menu next to the hub entry and choose **Reconfigure**. Your shades, entity ids and automations are kept.
+
 ## Options
+Settings → *Devices & Services* → **ShadeAuto** → **Configure**. Saving reloads the integration so changes take effect at once.
 - **Poll seconds**: idle `/status` poll interval while shades are not moving (default 30s).
 - **Low battery threshold**: battery % at which the `*_battery_low` flag turns on (default 20%).
 - **Min time between shade commands**: enforces a small gap between hub `/control` posts (helps avoid overload).

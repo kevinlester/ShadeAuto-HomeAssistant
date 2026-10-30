@@ -56,6 +56,7 @@ zero shades because of a bad reply.
 | `__init__.py` | wires everything into `entry.runtime_data` | all of the above |
 | `const.py` | every constant, with a comment on why it has that value | nothing |
 | `util.py` | small pure helpers (`to_int`, `battery_percent`) | nothing |
+| `compat.py` | import-level shims for the oldest supported Home Assistant release (see CONTRIBUTING.md) | Home Assistant only |
 
 Dependencies point downwards only: entities never call the hub directly for
 state, and the API never knows about Home Assistant.

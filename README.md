@@ -29,7 +29,7 @@ If your shades have no vanes, turn **Expose vane tilt** off in the integration's
 
 ## Requirements
 - ShadeAuto hub reachable on your LAN (port **10123**).
-- Home Assistant **2026.10** or newer.
+- Home Assistant **2025.8** or newer. Older releases stay on 0.3.0 through HACS; see CONTRIBUTING.md for how the minimum is chosen.
 
 ## Changing the hub address
 If your hub gets a new IP address, open Settings → *Devices & Services* → **ShadeAuto**, click the ⋯ menu next to the hub entry and choose **Reconfigure**. Devices, areas, names, entity ids and automations are kept: the integration identifies the hub by its `ThingName`, not by its address.

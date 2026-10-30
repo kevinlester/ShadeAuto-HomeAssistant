@@ -7,6 +7,7 @@ from typing import Any
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
+from .compat import link_to_hub
 from .const import DOMAIN, MANUFACTURER
 from .coordinator import Peripheral, ShadeAutoCoordinator
 
@@ -67,7 +68,11 @@ class ShadeAutoEntity(CoordinatorEntity[ShadeAutoCoordinator]):
         if firmware:
             self._attr_device_info["sw_version"] = str(firmware)
         if coordinator.hub_device_id is not None:
-            self._attr_device_info["via_device_id"] = coordinator.hub_device_id
+            link_to_hub(
+                self._attr_device_info,
+                hub_device_id=coordinator.hub_device_id,
+                hub_identifier=hub_device_identifier(coordinator.identity),
+            )
 
     @property
     def available(self) -> bool:

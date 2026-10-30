@@ -7,6 +7,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers import device_registry as dr, entity_registry as er
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
+from custom_components.shadeauto.compat import get_device_by_identifier
 from custom_components.shadeauto.const import DOMAIN
 
 from .conftest import (
@@ -52,18 +53,18 @@ async def test_hub_and_shade_devices_are_registered(
 ) -> None:
     """Devices are keyed on the hub's ThingName, not its host, and each shade hangs off the hub device."""
     registry = dr.async_get(hass)
-    hub_device = registry.async_get_device_by_identifier((DOMAIN, f"hub_{hub.thing_name}"), integration.entry_id)
+    hub_device = get_device_by_identifier(registry, (DOMAIN, f"hub_{hub.thing_name}"), integration.entry_id)
     assert hub_device is not None
     assert hub_device.model == "Local Hub"
     assert hub_device.name == f"ShadeAuto Hub ({HOST})"
 
-    shade = registry.async_get_device_by_identifier((DOMAIN, f"shade_{hub.thing_name}_{KITCHEN}"), integration.entry_id)
+    shade = get_device_by_identifier(registry, (DOMAIN, f"shade_{hub.thing_name}_{KITCHEN}"), integration.entry_id)
     assert shade is not None
     assert shade.via_device_id == hub_device.id
     assert shade.name == "Kitchen"
     assert shade.model == "PerfectSheer"
     assert shade.sw_version == "2.4.1"
-    assert registry.async_get_device_by_identifier((DOMAIN, f"shade_{HOST}_{KITCHEN}"), integration.entry_id) is None
+    assert get_device_by_identifier(registry, (DOMAIN, f"shade_{HOST}_{KITCHEN}"), integration.entry_id) is None
     assert len(dr.async_entries_for_config_entry(registry, integration.entry_id)) == 1 + len(ALL_UIDS)
 
 
@@ -87,7 +88,7 @@ async def test_host_keyed_devices_are_migrated_to_the_hub_identity(
     await setup_integration(hass, config_entry)
 
     new_identifier = (DOMAIN, f"shade_{hub.thing_name}_{KITCHEN}")
-    shade = registry.async_get_device_by_identifier(new_identifier, config_entry.entry_id)
+    shade = get_device_by_identifier(registry, new_identifier, config_entry.entry_id)
     assert shade is not None
     assert shade.id == old_shade.id
     assert shade.identifiers == {new_identifier}
@@ -99,7 +100,7 @@ async def test_host_keyed_devices_are_migrated_to_the_hub_identity(
     assert cover_id == "cover.kitchen_blind"
     assert entity_registry.async_get(cover_id).device_id == shade.id
 
-    hub_device = registry.async_get_device_by_identifier((DOMAIN, f"hub_{hub.thing_name}"), config_entry.entry_id)
+    hub_device = get_device_by_identifier(registry, (DOMAIN, f"hub_{hub.thing_name}"), config_entry.entry_id)
     assert hub_device is not None
     assert hub_device.id == old_hub.id
     assert shade.via_device_id == hub_device.id
@@ -124,7 +125,7 @@ async def test_duplicate_host_keyed_devices_do_not_block_setup(
     assert config_entry.state is ConfigEntryState.LOADED
 
     new_identifier = (DOMAIN, f"shade_{hub.thing_name}_{KITCHEN}")
-    migrated = registry.async_get_device_by_identifier(new_identifier, config_entry.entry_id)
+    migrated = get_device_by_identifier(registry, new_identifier, config_entry.entry_id)
     assert migrated is not None
     assert migrated.id == first.id
     assert er.async_get(hass).async_get(COVER[KITCHEN]).device_id == first.id

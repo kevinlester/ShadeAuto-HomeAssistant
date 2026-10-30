@@ -16,6 +16,7 @@ from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from .api import ShadeAutoApi
+from .compat import get_device_by_identifier
 from .const import CONF_HOST, DOMAIN, MANUFACTURER, PLATFORMS
 from .coordinator import ShadeAutoCoordinator
 from .entity import hub_device_identifier, shade_device_identifier
@@ -98,7 +99,7 @@ def _async_migrate_device_identifiers(registry: dr.DeviceRegistry, entry: Config
         taken = [
             existing
             for identifier in new_identifiers
-            if (existing := registry.async_get_device_by_identifier(identifier, entry.entry_id)) is not None
+            if (existing := get_device_by_identifier(registry, identifier, entry.entry_id)) is not None
             and existing.id != device.id
         ]
         if taken:

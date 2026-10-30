@@ -84,6 +84,33 @@ jobs:
           path: coverage.xml
           if-no-files-found: ignore
 
+  test-min:
+    # The oldest supported release (hacs.json "homeassistant"); see
+    # CONTRIBUTING.md "Supported Home Assistant versions". Dependencies are
+    # resolved as of that release, or newer transitive packages break the old
+    # core. Coverage is gated on the latest release only, because the shims in
+    # compat.py take the other branch here.
+    name: Tests on the minimum Home Assistant (2025.8)
+    runs-on: ubuntu-latest
+    env:
+      MIN_PYTHON_VERSION: "3.13"
+      MIN_EXCLUDE_NEWER: "2025-08-24T00:00:00Z"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@18d369b23da25a81e9458561248e1aafff6a70fa # v10.3.1
+        with:
+          python-version: ${{ env.MIN_PYTHON_VERSION }}
+          enable-cache: true
+          cache-dependency-glob: requirements_test_min.txt
+      - name: Install the minimum-version test harness
+        run: |
+          uv venv
+          uv pip install --exclude-newer "${MIN_EXCLUDE_NEWER}" -r requirements_test_min.txt
+      - name: Run tests
+        run: .venv/bin/python -m pytest -p no:cacheprovider -o addopts=""
+
   sast:
     name: Static analysis (bandit, pip-audit, zizmor)
     runs-on: ubuntu-latest

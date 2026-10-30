@@ -5,6 +5,12 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+- Supports Home Assistant 2025.8 and newer (0.4.0 required 2026.10). Three
+  import-level shims in `compat.py` cover the API differences, CI runs the
+  suite on 2025.8 as well as the latest release, and CONTRIBUTING.md
+  documents when the minimum moves.
+
 ## [0.4.0] - 2026-10-22
 
 ### Added

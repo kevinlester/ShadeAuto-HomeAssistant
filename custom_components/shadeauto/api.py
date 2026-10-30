@@ -2,8 +2,10 @@
 
 Every call is a JSON ``POST`` to ``http://<host>:10123/NM/v1/<endpoint>`` with
 no authentication. The hub identifies itself with a ``ThingName`` in the
-registration response, which later calls echo back. Positions are 0-100 with
-0 = fully lowered/closed and 100 = fully raised/open.
+registration response, which later calls echo back. Positions are 0-100:
+``BottomRailPosition`` 0 = fully lowered, 100 = fully raised;
+``MiddleRailPosition`` is the vane tilt on sheer shades, 0 = closed,
+100 = open. See ``docs/HUB_PROTOCOL.md`` for the observed behaviour.
 """
 
 from __future__ import annotations
@@ -19,12 +21,16 @@ from aiohttp import ClientSession, ClientTimeout
 
 from .const import (
     ATTR_BOTTOM_RAIL,
+    ATTR_ERROR,
     ATTR_MIDDLE_RAIL,
+    ATTR_MOTOR_STOP,
     ATTR_PERIPHERAL_UID,
     DEFAULT_PORT,
     DEFAULT_SEND_SPACING,
+    MOTOR_STOP,
     REQUEST_TIMEOUT_SEC,
 )
+from .util import to_int
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -34,11 +40,43 @@ class ShadeAutoError(Exception):
 
 
 class ShadeAutoConnectionError(ShadeAutoError):
-    """The hub could not be reached, timed out, or answered with an HTTP error."""
+    """The hub could not be reached, timed out, or answered with an HTTP error or a non-JSON body."""
+
+
+class ShadeAutoResponseError(ShadeAutoError):
+    """The hub answered a query with its error envelope instead of the requested document.
+
+    ``/GetAllPeripheral`` reports this as ``{"status": {"code": 1, "error": ...}}``
+    (for instance when the ``ThingName`` does not match), ``/registration`` as a
+    non-zero top-level ``Error``. Treating either as "no shades" would let setup
+    finish with an empty integration, so it is raised and setup retries instead.
+    """
+
+    def __init__(self, path: str, code: int, message: str = "") -> None:
+        super().__init__(f"{path}: hub answered error {code}{f' ({message})' if message else ''}")
+        self.code = code
+
+
+class ShadeAutoCommandError(ShadeAutoError):
+    """The hub answered a ``/control`` request with a non-zero ``Error`` code."""
+
+    def __init__(self, code: int, payload: dict[str, Any]) -> None:
+        super().__init__(f"hub rejected command with Error {code}: {payload}")
+        self.code = code
+        self.payload = payload
 
 
 def _now_ts() -> int:
     return int(time.time())
+
+
+def clamp_position(value: int) -> int:
+    """Clamp to the 0-100 range.
+
+    The hub does not validate ranges (it stored 250 verbatim in testing), so
+    clamp before sending.
+    """
+    return max(0, min(100, int(value)))
 
 
 def find_dicts_with_key(obj: Any, key: str) -> Iterator[dict[str, Any]]:
@@ -76,10 +114,15 @@ class ShadeAutoApi:
         self.thing_name: str | None = None
         self.send_spacing_sec = float(send_spacing_sec)
         # /control posts are serialised and spaced; see DEFAULT_SEND_SPACING.
+        # Spacing is measured on the monotonic clock so a wall-clock step
+        # cannot collapse or stretch the gap.
         self._cmd_lock = asyncio.Lock()
         self._last_send = 0.0
-        # The hub expects strictly increasing Timestamps on control commands.
+        # Timestamp and TaskID are kept strictly increasing per hub as a
+        # precaution against two commands in the same second/millisecond
+        # (inherited from upstream; not a verified hub requirement).
         self._last_ts = 0
+        self._last_task_id = 0
 
     @property
     def host(self) -> str:
@@ -92,7 +135,9 @@ class ShadeAutoApi:
             async with self._session.post(url, json=payload, timeout=ClientTimeout(total=REQUEST_TIMEOUT_SEC)) as resp:
                 resp.raise_for_status()
                 return await resp.json(content_type=None)
-        except (aiohttp.ClientError, TimeoutError) as err:
+        except (aiohttp.ClientError, TimeoutError, ValueError) as err:
+            # ValueError covers a body that is not JSON (json.JSONDecodeError),
+            # e.g. a captive portal or a different device answering on the port.
             raise ShadeAutoConnectionError(f"{path}: {err}") from err
 
     async def registration(self) -> dict[str, Any]:
@@ -100,13 +145,25 @@ class ShadeAutoApi:
         data = await self._post("registration", {"Timestamp": _now_ts()})
         if not isinstance(data, dict):
             return {}
+        code = to_int(data.get(ATTR_ERROR))
+        if code not in (None, 0):
+            raise ShadeAutoResponseError("registration", code)
         self.thing_name = data.get("ThingName") or data.get("thingName") or self.thing_name
         return data
 
     async def get_all_peripheral(self) -> list[dict[str, Any]]:
-        """Return the hub's shade records (names, module types), or ``[]`` before registration."""
+        """Return the hub's shade records (names, module types).
+
+        Raises :class:`ShadeAutoResponseError` on the hub's error envelope,
+        which is what it answers before :meth:`registration` has supplied the
+        ``ThingName``.
+        """
         payload = {"ThingName": self.thing_name, "TaskID": 1, "Timestamp": _now_ts()}
         data = await self._post("GetAllPeripheral", payload)
+        if isinstance(data, dict) and isinstance(status := data.get("status"), dict):
+            code = to_int(status.get("code"))
+            if code not in (None, 0):
+                raise ShadeAutoResponseError("GetAllPeripheral", code, str(status.get("error") or ""))
         return list(find_dicts_with_key(data, ATTR_PERIPHERAL_UID))
 
     async def status(self) -> list[dict[str, Any]]:
@@ -120,50 +177,64 @@ class ShadeAutoApi:
             _LOGGER.debug("status positions (uid:bottom/middle): %s", summary)
         return items
 
-    async def notification(self, *, timestamp: int, hold_sec: float) -> str:
-        """Long-poll for events since ``timestamp``.
+    # --- commands -------------------------------------------------------------
 
-        Returns the raw body, which may hold several JSON objects back to back,
-        or ``""`` when the hub held the connection for ``hold_sec`` without an
-        event. ``hold_sec`` is both the hold requested from the hub and the
-        bound on the client-side read.
-        """
-        hold_sec = float(hold_sec)
-        payload = {"ThingName": self.thing_name, "Timestamp": int(timestamp), "Timeout": hold_sec}
-        timeout_cfg = ClientTimeout(total=None, sock_connect=REQUEST_TIMEOUT_SEC, sock_read=hold_sec)
-        try:
-            async with self._session.post(f"{self._base}/notification", json=payload, timeout=timeout_cfg) as resp:
-                resp.raise_for_status()
-                return await resp.text()
-        except TimeoutError:
-            return ""
-        except aiohttp.ClientError as err:
-            raise ShadeAutoConnectionError(f"notification: {err}") from err
+    def _next_task_id(self) -> int:
+        """A per-command id: milliseconds masked into the hub's signed 31-bit range, never repeated."""
+        task_id = int(time.time() * 1000) & 0x7FFFFFFF
+        if task_id <= self._last_task_id:
+            task_id = (self._last_task_id + 1) & 0x7FFFFFFF
+        self._last_task_id = task_id
+        return task_id
 
-    @staticmethod
-    def _task_id() -> int:
-        """A per-command id; milliseconds masked into the hub's signed 31-bit range."""
-        return int(time.time() * 1000) & 0x7FFFFFFF
-
-    async def control(self, uid: int | str, *, bottom: int | None = None) -> Any:
-        """Move a shade's bottom rail to ``bottom`` (0-100) and return the hub's reply."""
+    def _next_timestamp(self) -> int:
+        """Whole seconds, bumped by one when a command lands in the same second as the last."""
         now = _now_ts()
         self._last_ts = now if now > self._last_ts else self._last_ts + 1
-        payload: dict[str, Any] = {
-            ATTR_PERIPHERAL_UID: int(uid) if str(uid).isdigit() else uid,
-            "TaskID": self._task_id(),
-            "Timestamp": self._last_ts,
-        }
-        if self.thing_name:
-            payload["ThingName"] = self.thing_name
-        if bottom is not None:
-            payload[ATTR_BOTTOM_RAIL] = int(bottom)
+        return self._last_ts
 
+    async def control(self, uid: int | str, *, bottom: int, middle: int | None = None) -> dict[str, Any]:
+        """Move a shade and return the hub's reply.
+
+        ``bottom`` is always sent: the hub rejects a command that carries only
+        ``MiddleRailPosition`` (``Error 2``), and a command without
+        ``MiddleRailPosition`` makes the hub reset the vane target to 0. Pass
+        ``middle`` explicitly whenever the vanes should stay where they are.
+        Vanes are only honoured by the hub while the shade is fully lowered.
+        """
+        fields: dict[str, Any] = {ATTR_BOTTOM_RAIL: clamp_position(bottom)}
+        if middle is not None:
+            fields[ATTR_MIDDLE_RAIL] = clamp_position(middle)
+        return await self._send_control(uid, fields)
+
+    async def stop(self, uid: int | str) -> dict[str, Any]:
+        """Stop a moving shade. The hub then re-targets the shade to wherever it stopped."""
+        return await self._send_control(uid, {ATTR_MOTOR_STOP: MOTOR_STOP})
+
+    async def _send_control(self, uid: int | str, fields: dict[str, Any]) -> dict[str, Any]:
         async with self._cmd_lock:
-            gap = self.send_spacing_sec - (time.time() - self._last_send)
-            if gap > 0:
+            # Sleeps the remaining gap, re-checked because a timer may fire a
+            # hair early; not a busy wait.
+            while (gap := self.send_spacing_sec - (time.monotonic() - self._last_send)) > 0:  # noqa: ASYNC110
                 await asyncio.sleep(gap)
+            # Built inside the lock, after the wait, so commands queued in the
+            # same event-loop tick still get distinct TaskIDs and Timestamps.
+            payload: dict[str, Any] = {
+                ATTR_PERIPHERAL_UID: int(uid) if str(uid).isdigit() else uid,
+                "TaskID": self._next_task_id(),
+                "Timestamp": self._next_timestamp(),
+            }
+            if self.thing_name:
+                payload["ThingName"] = self.thing_name
+            payload.update(fields)
             try:
-                return await self._post("control", payload)
+                reply = await self._post("control", payload)
             finally:
-                self._last_send = time.time()
+                self._last_send = time.monotonic()
+
+        if not isinstance(reply, dict):
+            return {}
+        code = reply.get(ATTR_ERROR)
+        if isinstance(code, int) and code != 0:
+            raise ShadeAutoCommandError(code, payload)
+        return reply

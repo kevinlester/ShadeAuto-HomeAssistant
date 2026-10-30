@@ -26,15 +26,16 @@
     "step": {
       "init": {
         "title": "ShadeAuto options",
-        "description": "Tuning for pacing, verification, and polling. Changes apply immediately. To change the hub's IP address or hostname, use Reconfigure from the entry's menu instead.",
+        "description": "Tuning for polling, pacing and verification. Changes apply immediately. To change the hub's IP address or hostname, use Reconfigure from the entry's menu instead.",
         "data": {
-          "poll_seconds": "Poll interval (seconds)",
+          "poll_seconds": "Poll interval while idle (seconds)",
+          "motion_poll_sec": "Poll interval while a shade is moving (seconds)",
+          "tilt_enabled": "Expose vane tilt (PerfectSheer and other vane shades)",
           "low_battery_threshold": "Low battery threshold (%)",
           "send_spacing_sec": "Minimum time between shade commands (s)",
           "verify_enabled": "Verify the shade arrived and retry once if not",
           "verify_delay_sec": "Seconds to wait before verifying",
-          "notification_timeout_sec": "Notification hold timeout (seconds; -1 for infinite)",
-          "estimation_enabled": "Animate the position slider while a shade is moving",
+          "estimation_enabled": "Animate the position slider while a shade is moving (the hub's position always wins)",
           "full_travel_time_sec": "Time for a full open or close (seconds)"
         }
       }

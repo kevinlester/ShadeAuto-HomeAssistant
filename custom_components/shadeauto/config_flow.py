@@ -27,9 +27,10 @@ from .const import (
     CONF_FULL_TRAVEL_TIME_SEC,
     CONF_HOST,
     CONF_LOW_BATTERY_THRESHOLD,
-    CONF_NOTIFICATION_TIMEOUT_SEC,
+    CONF_MOTION_POLL_SEC,
     CONF_POLL_SECONDS,
     CONF_SEND_SPACING_SEC,
+    CONF_TILT_ENABLED,
     CONF_VERIFY_DELAY_SEC,
     CONF_VERIFY_ENABLED,
     DOMAIN,
@@ -84,6 +85,8 @@ class ShadeAutoConfigFlow(ConfigFlow, domain=DOMAIN):
         if user_input is not None:
             host = user_input[CONF_HOST].strip()
             new_unique_id = _unique_id(host)
+            # Not _abort_if_unique_id_configured(): it would also trip on this
+            # entry's own unique id when the host is submitted unchanged.
             if any(
                 other.unique_id == new_unique_id and other.entry_id != entry.entry_id
                 for other in self._async_current_entries(include_ignore=False)
@@ -112,13 +115,16 @@ class ShadeAutoOptionsFlow(OptionsFlowWithReload):
         schema = Schema(
             {
                 Optional(CONF_POLL_SECONDS, default=current.poll_seconds): _seconds(5, 120, box=True),
+                Optional(CONF_MOTION_POLL_SEC, default=current.motion_poll_sec): _seconds(1, 10, 0.5),
+                Optional(CONF_TILT_ENABLED, default=current.tilt_enabled): BooleanSelector(),
                 Optional(CONF_LOW_BATTERY_THRESHOLD, default=current.low_battery_threshold): NumberSelector(
                     NumberSelectorConfig(min=5, max=50, step=1, unit_of_measurement="%")
                 ),
                 Optional(CONF_SEND_SPACING_SEC, default=current.send_spacing_sec): _seconds(0.15, 1.0, 0.05),
                 Optional(CONF_VERIFY_ENABLED, default=current.verify_enabled): BooleanSelector(),
-                Optional(CONF_VERIFY_DELAY_SEC, default=current.verify_delay_sec): _seconds(1, 60),
-                Optional(CONF_NOTIFICATION_TIMEOUT_SEC, default=current.notification_timeout_sec): _seconds(-1, 10),
+                # The hub reports end states 10-35 s after a command; verifying
+                # sooner would re-send a command the shade is still carrying out.
+                Optional(CONF_VERIFY_DELAY_SEC, default=current.verify_delay_sec): _seconds(30, 120),
                 Optional(CONF_ESTIMATION_ENABLED, default=current.estimation_enabled): BooleanSelector(),
                 Optional(CONF_FULL_TRAVEL_TIME_SEC, default=current.full_travel_time_sec): _seconds(5, 120),
             }

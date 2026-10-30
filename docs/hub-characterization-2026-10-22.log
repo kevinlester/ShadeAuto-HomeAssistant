@@ -1,0 +1,100 @@
+# ShadeAuto hub characterization log, 2026-10-22, shade 12177 ("Kitchen")
+#
+# Produced by tools/hubwatch.py (one run per "#####" header; each run starts with a
+# fresh snapshot, so changes between runs are not recorded). Times are the client's
+# wall clock, America/Detroit (EDT). Hub identity lines were filtered out.
+#
+# The first four runs (C1, T2, C3, T3) were not written to this file at the time;
+# they are transcribed verbatim below from the hubwatch output captured in the
+# session transcript. Everything from C2a onwards was appended live.
+
+##### C1: MiddleRailPosition=0 alone, --notify running (hold 50 s; the 40 s run ended before the long-poll could return) #####
+control 12177 {'MiddleRailPosition': 0} -> {"PeripheralUID": 12177, "Error": 2, "TaskID": 1658827752, "RequestTimestamp": 1792660190, "Timestamp": 1792660190194}
+05:09:50 12177 Kitchen            BottomRailPosition=0  TargetBottomRailPosition=0  MiddleRailPosition=50  TargetMiddleRailPosition=50  BatteryVoltage=100  CalibrationState=0  SpeedInformation=0
+05:09:50 hub Error=0  PairingMode=0  OTA=0
+
+##### T2: BottomRailPosition=0 alone (shade already at 0; learn the success reply) #####
+control 12177 {'BottomRailPosition': 0} -> {"PeripheralUID": 12177, "BottomRailPosition": 0, "MiddleRailPosition": 0, "Error": 0, "TaskID": 1658902138, "RequestTimestamp": 1792660264, "Timestamp": 1792660264575}
+05:11:04 12177                    BottomRailPosition=0  TargetBottomRailPosition=0  MiddleRailPosition=50  TargetMiddleRailPosition=0  BatteryVoltage=100  CalibrationState=0  SpeedInformation=0
+05:11:04 hub Error=0  PairingMode=0  OTA=0
+
+##### T1/C3: BottomRailPosition=0 + MiddleRailPosition=0 together (vanes 50 -> 0 expected), --notify running #####
+control 12177 {'BottomRailPosition': 0, 'MiddleRailPosition': 0} -> {"PeripheralUID": 12177, "BottomRailPosition": 0, "MiddleRailPosition": 0, "Error": 0, "TaskID": 1658908518, "RequestTimestamp": 1792660270, "Timestamp": 1792660270974}
+05:11:11 12177                    BottomRailPosition=0  TargetBottomRailPosition=0  MiddleRailPosition=50  TargetMiddleRailPosition=0  BatteryVoltage=100  CalibrationState=0  SpeedInformation=0
+05:11:11 hub Error=0  PairingMode=0  OTA=0
+05:11:32.851          12177                    MiddleRailPosition 50 -> 0
+
+##### T3: MiddleRailPosition=100 alone again (reproduce Error 2?) #####
+control 12177 {'MiddleRailPosition': 100} -> {"PeripheralUID": 12177, "Error": 2, "TaskID": 1658938837, "RequestTimestamp": 1792660301, "Timestamp": 1792660301274}
+05:11:41 12177                    BottomRailPosition=0  TargetBottomRailPosition=0  MiddleRailPosition=0  TargetMiddleRailPosition=0  BatteryVoltage=100  CalibrationState=0  SpeedInformation=0
+05:11:41 hub Error=0  PairingMode=0  OTA=0
+
+##### C2a: BottomRailPosition=50 + MiddleRailPosition=100 (raise to 50 with vane target open) #####
+control 12177 {'BottomRailPosition': 50, 'MiddleRailPosition': 100} -> {"PeripheralUID": 12177, "BottomRailPosition": 50, "MiddleRailPosition": 100, "Error": 0, "TaskID": 1658991231, "RequestTimestamp": 1792660353, "Timestamp": 1792660353684}
+05:12:33 12177                    BottomRailPosition=0  TargetBottomRailPosition=50  MiddleRailPosition=0  TargetMiddleRailPosition=100  BatteryVoltage=100  CalibrationState=0  SpeedInformation=0
+05:12:33 hub Error=0  PairingMode=0  OTA=0
+05:13:04.105          12177                    BottomRailPosition 0 -> 50
+05:13:04.105 +  0.0s  12177                    TargetMiddleRailPosition 100 -> 0
+##### C2b: BottomRailPosition=0 + MiddleRailPosition=100 (lower fully with vanes open) #####
+control 12177 {'BottomRailPosition': 0, 'MiddleRailPosition': 100} -> {"PeripheralUID": 12177, "BottomRailPosition": 0, "MiddleRailPosition": 100, "Error": 0, "TaskID": 1659037383, "RequestTimestamp": 1792660399, "Timestamp": 1792660399834}
+05:13:19 12177                    BottomRailPosition=50  TargetBottomRailPosition=0  MiddleRailPosition=0  TargetMiddleRailPosition=100  BatteryVoltage=100  CalibrationState=0  SpeedInformation=0
+05:13:19 hub Error=0  PairingMode=0  OTA=0
+05:13:47.896          12177                    BottomRailPosition 50 -> 0
+05:13:47.896 +  0.0s  12177                    MiddleRailPosition 0 -> 100
+##### C4a: BottomRailPosition=100 (start a full raise) #####
+control 12177 {'BottomRailPosition': 100} -> {"PeripheralUID": 12177, "BottomRailPosition": 100, "MiddleRailPosition": 0, "Error": 0, "TaskID": 1659169839, "RequestTimestamp": 1792660532, "Timestamp": 1792660532285}
+05:15:32 12177                    BottomRailPosition=0  TargetBottomRailPosition=100  MiddleRailPosition=100  TargetMiddleRailPosition=0  BatteryVoltage=100  CalibrationState=0  SpeedInformation=0
+05:15:32 hub Error=0  PairingMode=0  OTA=0
+##### C4b: MotorStop=170 alone, ~8s into the travel #####
+control 12177 {'MotorStop': 170} -> {"PeripheralUID": 12177, "MotorStop": 170, "Error": 0, "TaskID": 1659178329, "RequestTimestamp": 1792660540, "Timestamp": 1792660540774}
+05:15:40 12177                    BottomRailPosition=0  TargetBottomRailPosition=100  MiddleRailPosition=100  TargetMiddleRailPosition=0  BatteryVoltage=100  CalibrationState=0  SpeedInformation=0
+05:15:40 hub Error=0  PairingMode=0  OTA=0
+05:16:16.271          12177                    BottomRailPosition 0 -> 25
+05:16:16.271 +  0.0s  12177                    TargetBottomRailPosition 100 -> 25
+05:16:16.271 +  0.0s  12177                    MiddleRailPosition 100 -> 0
+##### C6a: BottomRailPosition=250 (out of range) #####
+control 12177 {'BottomRailPosition': 250} -> {"PeripheralUID": 12177, "BottomRailPosition": 250, "MiddleRailPosition": 0, "Error": 0, "TaskID": 1659260174, "RequestTimestamp": 1792660622, "Timestamp": 1792660622605}
+05:17:02 12177                    BottomRailPosition=25  TargetBottomRailPosition=250  MiddleRailPosition=0  TargetMiddleRailPosition=0  BatteryVoltage=100  CalibrationState=0  SpeedInformation=0
+05:17:02 hub Error=0  PairingMode=0  OTA=0
+##### C6b: BottomRailPosition=25 MiddleRailPosition=250 (out of range tilt) #####
+control 12177 {'BottomRailPosition': 25, 'MiddleRailPosition': 250} -> {"PeripheralUID": 12177, "BottomRailPosition": 25, "MiddleRailPosition": 250, "Error": 0, "TaskID": 1659264479, "RequestTimestamp": 1792660626, "Timestamp": 1792660626914}
+05:17:06 12177                    BottomRailPosition=25  TargetBottomRailPosition=25  MiddleRailPosition=0  TargetMiddleRailPosition=250  BatteryVoltage=100  CalibrationState=0  SpeedInformation=0
+05:17:06 hub Error=0  PairingMode=0  OTA=0
+##### C6c: BottomRailPosition=25 MiddleRailPosition=100 (vane target while stationary at 25) #####
+control 12177 {'BottomRailPosition': 25, 'MiddleRailPosition': 100} -> {"PeripheralUID": 12177, "BottomRailPosition": 25, "MiddleRailPosition": 100, "Error": 0, "TaskID": 1659268770, "RequestTimestamp": 1792660631, "Timestamp": 1792660631194}
+05:17:11 12177                    BottomRailPosition=25  TargetBottomRailPosition=25  MiddleRailPosition=0  TargetMiddleRailPosition=100  BatteryVoltage=100  CalibrationState=0  SpeedInformation=0
+05:17:11 hub Error=0  PairingMode=0  OTA=0
+05:17:20.612          12177                    TargetMiddleRailPosition 100 -> 0
+##### C5: user moves Kitchen with remote, then app (watch with --notify) #####
+05:18:04 12177                    BottomRailPosition=25  TargetBottomRailPosition=25  MiddleRailPosition=0  TargetMiddleRailPosition=0  BatteryVoltage=100  CalibrationState=0  SpeedInformation=0
+05:18:04 hub Error=0  PairingMode=0  OTA=0
+05:19:04 NOTIFY (hub returned without an event)
+05:20:04 NOTIFY (hub returned without an event)
+05:21:04 NOTIFY (hub returned without an event)
+05:22:04 NOTIFY (hub returned without an event)
+05:23:19 NOTIFY (hub returned without an event)
+05:23:36.539          12177                    TargetBottomRailPosition 25 -> 0
+05:23:43.806 +  7.3s  12177                    TargetMiddleRailPosition 0 -> 100
+05:24:05.690 + 21.9s  12177                    BottomRailPosition 25 -> 0
+05:24:05.690 +  0.0s  12177                    MiddleRailPosition 0 -> 100
+##### C8: remote move (hub blind?) then RequestModuleInfo probe #####
+05:32:28 12177                    BottomRailPosition=0  TargetBottomRailPosition=0  MiddleRailPosition=100  TargetMiddleRailPosition=100  BatteryVoltage=100  CalibrationState=0  SpeedInformation=0
+05:32:28 hub Error=0  PairingMode=0  OTA=0
+05:34:16.528          12177                    BottomRailPosition 0 -> 45
+05:34:16.528 +  0.0s  12177                    TargetBottomRailPosition 0 -> 45
+05:34:16.528 +  0.0s  12177                    MiddleRailPosition 100 -> 0
+##### C8a: RequestModuleInfo=170 #####
+control 12177 {'RequestModuleInfo': 170} -> {"PeripheralUID": 12177, "RequestModuleInfo": 170, "Error": 0, "TaskID": 1660306503, "RequestTimestamp": 1792661668, "Timestamp": 1792661668971}
+05:34:29 12177                    BottomRailPosition=45  TargetBottomRailPosition=45  MiddleRailPosition=0  TargetMiddleRailPosition=0  BatteryVoltage=100  CalibrationState=0  SpeedInformation=0
+05:34:16.528 +  0.0s  12177                    TargetMiddleRailPosition 100 -> 0
+05:34:29 hub Error=0  PairingMode=0  OTA=0
+##### C8b: StatusRequest=170 #####
+control 12177 {'StatusRequest': 170} -> {"PeripheralUID": 12177, "StatusRequest": 170, "Error": 0, "TaskID": 1660347220, "RequestTimestamp": 1792661709, "Timestamp": 1792661709686}
+05:35:09 12177                    BottomRailPosition=45  TargetBottomRailPosition=45  MiddleRailPosition=0  TargetMiddleRailPosition=0  BatteryVoltage=100  CalibrationState=0  SpeedInformation=0
+05:35:09 hub Error=0  PairingMode=0  OTA=0
+##### restore: BottomRailPosition=0 MiddleRailPosition=100 #####
+control 12177 {'BottomRailPosition': 0, 'MiddleRailPosition': 100} -> {"PeripheralUID": 12177, "BottomRailPosition": 0, "MiddleRailPosition": 100, "Error": 0, "TaskID": 1660521458, "RequestTimestamp": 1792661883, "Timestamp": 1792661883906}
+05:38:03 12177                    BottomRailPosition=45  TargetBottomRailPosition=0  MiddleRailPosition=0  TargetMiddleRailPosition=100  BatteryVoltage=100  CalibrationState=0  SpeedInformation=0
+05:38:03 hub Error=0  PairingMode=0  OTA=0
+05:38:38.181          12177                    BottomRailPosition 45 -> 0
+05:38:38.181 +  0.0s  12177                    MiddleRailPosition 0 -> 100

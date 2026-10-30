@@ -8,11 +8,12 @@ from unittest.mock import patch
 from homeassistant.config_entries import SOURCE_USER
 from homeassistant.core import HomeAssistant
 from homeassistant.data_entry_flow import FlowResultType
+from homeassistant.helpers import device_registry as dr, entity_registry as er
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.shadeauto.const import DOMAIN
 
-from .conftest import HOST, FakeHub
+from .conftest import ALL_UIDS, COVER, HOST, KITCHEN, FakeHub
 
 NEW_HOST = "192.168.3.250"
 
@@ -60,8 +61,16 @@ async def test_user_flow_aborts_for_configured_host(
 async def test_reconfigure_moves_entry_to_new_host(
     hass: HomeAssistant, hub: FakeHub, integration: MockConfigEntry
 ) -> None:
-    """Reconfiguring changes host, unique id and title, then reloads against the new host."""
+    """Reconfiguring changes host, unique id and title, then reloads against the new host.
+
+    Devices are keyed on the hub's identity, so the shades keep their devices
+    (and with them their areas and names) across the move.
+    """
     hub.add_host(NEW_HOST)
+    device_registry = dr.async_get(hass)
+    kitchen_device_id = er.async_get(hass).async_get(COVER[KITCHEN]).device_id
+    hub_device_id = integration.runtime_data.coordinator.hub_device_id
+
     result = await integration.start_reconfigure_flow(hass)
     assert result["type"] is FlowResultType.FORM
     assert result["step_id"] == "reconfigure"
@@ -75,6 +84,11 @@ async def test_reconfigure_moves_entry_to_new_host(
     assert integration.unique_id == f"shadeauto_{NEW_HOST}"
     assert integration.title == f"ShadeAuto ({NEW_HOST})"
     assert integration.runtime_data.api.host == NEW_HOST
+
+    assert er.async_get(hass).async_get(COVER[KITCHEN]).device_id == kitchen_device_id
+    assert integration.runtime_data.coordinator.hub_device_id == hub_device_id
+    assert device_registry.async_get(hub_device_id).name == f"ShadeAuto Hub ({NEW_HOST})"
+    assert len(dr.async_entries_for_config_entry(device_registry, integration.entry_id)) == 1 + len(ALL_UIDS)
 
 
 async def test_reconfigure_rejects_unreachable_host(
@@ -116,11 +130,12 @@ async def test_options_flow_reloads_entry_with_new_values(
         result["flow_id"],
         {
             "poll_seconds": 10,
+            "motion_poll_sec": 1.5,
+            "tilt_enabled": False,
             "low_battery_threshold": 30,
             "send_spacing_sec": 0.2,
             "verify_enabled": False,
-            "verify_delay_sec": 5,
-            "notification_timeout_sec": 1,
+            "verify_delay_sec": 45,
             "estimation_enabled": False,
             "full_travel_time_sec": 20,
         },
@@ -131,6 +146,9 @@ async def test_options_flow_reloads_entry_with_new_values(
     assert integration.options["poll_seconds"] == 10
     coordinator = integration.runtime_data.coordinator
     assert coordinator.options.poll_seconds == 10
+    assert coordinator.options.motion_poll_sec == 1.5
+    assert coordinator.options.tilt_enabled is False
     assert coordinator.options.low_battery_threshold == 30
     assert coordinator.update_interval == timedelta(seconds=10)
     assert coordinator.api.send_spacing_sec == 0.2
+    assert "current_tilt_position" not in hass.states.get("cover.kitchen").attributes

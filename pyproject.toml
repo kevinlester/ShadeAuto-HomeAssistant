@@ -34,7 +34,7 @@ combine-as-imports = true
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
-addopts = "--cov=custom_components.shadeauto --cov-report=term-missing"
+addopts = "--cov=custom_components.shadeauto --cov-report=term-missing --cov-fail-under=85"
 filterwarnings = [
     "error::DeprecationWarning:custom_components.shadeauto",
 ]

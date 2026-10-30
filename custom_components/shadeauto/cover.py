@@ -1,25 +1,44 @@
-"""Cover entities: one per shade, driving the bottom rail.
+"""Cover entities: one per shade, with lift on the bottom rail and vane tilt on the middle rail.
 
-The hub reports a shade's position only after it has moved, so while a
-command is in flight the entity interpolates the slider from the last known
-position to the target over ``full_travel_time_sec`` ("estimation"). The
-coordinator's view wins whenever estimation is off or has no active move.
+Position and tilt come from the hub. Because the hub reports only end states,
+the entity interpolates the position slider during a lift ("estimation") from
+the last known position to the target over ``full_travel_time_sec``. The
+estimate is dropped as soon as the coordinator no longer sees the bottom rail
+moving, or as soon as the hub's target is no longer the one being estimated
+toward (the app or a remote re-commanded the shade mid-move), so the hub
+always wins once it has something to say.
+
+Hub rules that shape the commands (see ``docs/HUB_PROTOCOL.md``):
+
+* every command must carry ``BottomRailPosition``; leaving out
+  ``MiddleRailPosition`` makes the hub close the vanes;
+* vanes are honoured only while the shade is fully lowered, so a tilt command
+  is sent as ``(bottom 0, middle tilt)`` and lowers the shade if needed, as
+  ``homeassistant.components.hunterdouglas_powerview.cover.PowerViewShadeWithTiltOnClosed``
+  does for shades that tilt only when closed.
 """
 
 from __future__ import annotations
 
 import asyncio
+from dataclasses import dataclass
 import logging
 import time
 from typing import TYPE_CHECKING, Any
 
-from homeassistant.components.cover import ATTR_POSITION, CoverEntity, CoverEntityFeature
-from homeassistant.core import HomeAssistant
+from homeassistant.components.cover import (
+    ATTR_POSITION,
+    ATTR_TILT_POSITION,
+    CoverDeviceClass,
+    CoverEntity,
+    CoverEntityFeature,
+)
+from homeassistant.core import HomeAssistant, callback
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
-from .api import ShadeAutoError
-from .const import DOMAIN
+from .api import ShadeAutoError, clamp_position
+from .const import AXIS_BOTTOM, AXIS_MIDDLE, DOMAIN
 from .coordinator import ShadeAutoCoordinator
 from .entity import ShadeAutoEntity
 
@@ -28,10 +47,46 @@ if TYPE_CHECKING:
 
 _LOGGER = logging.getLogger(__name__)
 
+LIFT_FEATURES = (
+    CoverEntityFeature.OPEN | CoverEntityFeature.CLOSE | CoverEntityFeature.SET_POSITION | CoverEntityFeature.STOP
+)
+TILT_FEATURES = (
+    CoverEntityFeature.OPEN_TILT
+    | CoverEntityFeature.CLOSE_TILT
+    | CoverEntityFeature.SET_TILT_POSITION
+    # STOP_TILT sends the same MotorStop as STOP (one motor, one command). On the
+    # hub it was verified stopping a lift; a stop during a vane move was not
+    # tried separately (docs/HUB_PROTOCOL.md, open question 12).
+    | CoverEntityFeature.STOP_TILT
+)
+
 # Slider animation refresh bounds: fast enough to look smooth, slow enough not to flood the state machine.
 _ANIMATION_MIN_INTERVAL = 0.1
 _ANIMATION_MAX_INTERVAL = 0.5
 _ANIMATION_FRAMES = 20
+
+
+@dataclass(frozen=True, slots=True)
+class _LiftEstimate:
+    """One interpolated lift: from ``start_pos`` at ``start_ts`` to ``target`` over ``travel_time_s``."""
+
+    start_pos: float
+    target: int
+    start_ts: float
+    travel_time_s: float
+
+    def finished(self, now: float) -> bool:
+        return now - self.start_ts >= self.travel_time_s
+
+    def position_at(self, now: float) -> float:
+        """Where the shade is believed to be at ``now``."""
+        if self.finished(now):
+            # Travel time elapsed but the hub has not reported the end state
+            # yet (it only does so once the motor stops): hold the slider at
+            # the target rather than snapping back to the stale actual.
+            return float(self.target)
+        ratio = max(0.0, now - self.start_ts) / self.travel_time_s
+        return self.start_pos + (self.target - self.start_pos) * ratio
 
 
 async def async_setup_entry(
@@ -42,18 +97,16 @@ async def async_setup_entry(
 
 
 class ShadeAutoCover(ShadeAutoEntity, CoverEntity):
-    """A shade's bottom rail as a Home Assistant cover."""
+    """A shade as a Home Assistant cover: lift plus, on vane shades, tilt."""
 
     _attr_name = None  # the main entity carries the device name
-    _attr_supported_features = CoverEntityFeature.OPEN | CoverEntityFeature.CLOSE | CoverEntityFeature.SET_POSITION
+    _attr_device_class = CoverDeviceClass.SHADE
 
     def __init__(self, coordinator: ShadeAutoCoordinator, uid: str) -> None:
         super().__init__(coordinator, uid)
-        # Estimation of the current move: start position, target, start time, duration.
-        self._est_start_pos: float | None = None
-        self._est_target: float | None = None
-        self._est_start_ts: float | None = None
-        self._est_travel_time_s: float | None = None
+        self._has_tilt = coordinator.options.tilt_enabled
+        self._attr_supported_features = LIFT_FEATURES | (TILT_FEATURES if self._has_tilt else CoverEntityFeature(0))
+        self._estimate: _LiftEstimate | None = None
         self._anim_task: asyncio.Task[None] | None = None
         self._removed = False
 
@@ -62,76 +115,71 @@ class ShadeAutoCover(ShadeAutoEntity, CoverEntity):
         self._cancel_animation()
         await super().async_will_remove_from_hass()
 
-    # --- estimation ---------------------------------------------------------
+    @callback
+    def _handle_coordinator_update(self) -> None:
+        # The one place a stale estimate is dropped (the hub reported the end of
+        # the move, or its target is no longer ours), so the position property
+        # can stay a pure read.
+        self._estimate = self._valid_estimate()
+        super()._handle_coordinator_update()
+
+    # --- estimation (bottom rail only) ------------------------------------------
+
+    def _valid_estimate(self) -> _LiftEstimate | None:
+        """The lift estimate while it still describes what the hub is doing, else ``None``."""
+        estimate = self._estimate
+        if estimate is None or not self.coordinator.options.estimation_enabled:
+            return None
+        if not self.coordinator.is_moving(self._uid, AXIS_BOTTOM):
+            return None
+        if self.coordinator.get_target(self._uid, AXIS_BOTTOM) != estimate.target:
+            return None
+        return estimate
 
     def _estimation_active(self) -> bool:
-        """True while estimation is enabled and a move is still being interpolated."""
-        if not self.coordinator.options.estimation_enabled:
-            return False
-        if self._est_start_pos is None or self._est_target is None or self._est_start_ts is None:
-            return False
-        if self._est_travel_time_s is None or self._est_travel_time_s <= 0:
-            return False
-        return time.monotonic() - self._est_start_ts < self._est_travel_time_s
+        """True while the slider still has frames to render; the animation's loop condition."""
+        estimate = self._valid_estimate()
+        return estimate is not None and not estimate.finished(time.monotonic())
 
-    def _current_estimated_position(self) -> int | None:
-        """Interpolated position during a move; the coordinator's value otherwise."""
-        if (
-            not self.coordinator.options.estimation_enabled
-            or self._est_start_pos is None
-            or self._est_target is None
-            or self._est_start_ts is None
-        ):
-            return self.coordinator.get_effective_position(self._uid)
-        if not self._est_travel_time_s or self._est_travel_time_s <= 0:
-            return round(self._est_target)
-        elapsed = max(0.0, time.monotonic() - self._est_start_ts)
-        if elapsed >= self._est_travel_time_s:
-            return round(self._est_target)
-        ratio = min(elapsed / self._est_travel_time_s, 1.0)
-        return round(self._est_start_pos + (self._est_target - self._est_start_pos) * ratio)
+    def _estimated_position(self) -> int | None:
+        """Interpolated lift position while the estimate holds; the hub's value otherwise. A pure read."""
+        estimate = self._valid_estimate()
+        if estimate is None:
+            return self.coordinator.get_position(self._uid, AXIS_BOTTOM)
+        return round(estimate.position_at(time.monotonic()))
 
-    def _start_estimation_for_command(self, target: int) -> None:
-        """Begin interpolating toward ``target`` from wherever the shade is believed to be now."""
+    def _start_estimation(self, target: int) -> None:
+        """Begin interpolating the lift toward ``target`` from where the slider is now."""
         options = self.coordinator.options
         if not options.estimation_enabled:
             self._clear_estimation()
             return
-
-        now = time.monotonic()
-        start_pos: float | None = None
-        # A command issued mid-move starts from the interpolated position, not the old baseline.
-        if (
-            self._est_start_pos is not None
-            and self._est_target is not None
-            and self._est_start_ts is not None
-            and self._est_travel_time_s
-        ):
-            ratio_prev = min(max(0.0, now - self._est_start_ts) / self._est_travel_time_s, 1.0)
-            start_pos = self._est_start_pos + (self._est_target - self._est_start_pos) * ratio_prev
-        if start_pos is None:
-            start_pos = float(self.coordinator.get_effective_position(self._uid) or 0)
-
-        self._est_start_pos = start_pos
-        self._est_target = float(target)
-        self._est_start_ts = now
+        # A command issued mid-move starts from the interpolated position, not the stale hub actual.
+        start_pos = float(self._estimated_position() or 0)
         distance = abs(target - start_pos)
-        self._est_travel_time_s = options.full_travel_time_sec * distance / 100.0 if distance > 0 else 0.0
-        _LOGGER.debug("UID %s estimation: %.1f -> %s over %.1fs", self._uid, start_pos, target, self._est_travel_time_s)
+        self._estimate = _LiftEstimate(
+            start_pos=start_pos,
+            target=target,
+            start_ts=time.monotonic(),
+            travel_time_s=options.full_travel_time_sec * distance / 100.0,
+        )
+        _LOGGER.debug(
+            "UID %s estimation: %.1f -> %s over %.1fs", self._uid, start_pos, target, self._estimate.travel_time_s
+        )
 
     def _clear_estimation(self) -> None:
-        self._est_start_pos = None
-        self._est_target = None
-        self._est_start_ts = None
-        self._est_travel_time_s = None
+        self._estimate = None
 
     def _start_animation(self) -> None:
         """Restart the task that re-renders the slider during the estimated move."""
         self._cancel_animation()
-        if not self._estimation_active():
+        estimate = self._valid_estimate()
+        if estimate is None or estimate.finished(time.monotonic()):
             return
+        frame = estimate.travel_time_s / _ANIMATION_FRAMES
+        interval = max(_ANIMATION_MIN_INTERVAL, min(_ANIMATION_MAX_INTERVAL, frame))
         self._anim_task = self.coordinator.config_entry.async_create_background_task(
-            self.hass, self._animate_slider(), name=f"{DOMAIN} slider {self._uid}"
+            self.hass, self._animate_slider(interval), name=f"{DOMAIN} slider {self._uid}"
         )
 
     def _cancel_animation(self) -> None:
@@ -139,12 +187,8 @@ class ShadeAutoCover(ShadeAutoEntity, CoverEntity):
             self._anim_task.cancel()
         self._anim_task = None
 
-    async def _animate_slider(self) -> None:
-        """Write state a few times per second until the estimated move completes."""
-        assert self._est_travel_time_s  # guaranteed by _start_animation
-        interval = max(
-            _ANIMATION_MIN_INTERVAL, min(_ANIMATION_MAX_INTERVAL, self._est_travel_time_s / _ANIMATION_FRAMES)
-        )
+    async def _animate_slider(self, interval: float) -> None:
+        """Write state every ``interval`` seconds until the estimated move completes."""
         try:
             while self._estimation_active():
                 self.async_write_ha_state()
@@ -158,46 +202,115 @@ class ShadeAutoCover(ShadeAutoEntity, CoverEntity):
 
     @property
     def current_cover_position(self) -> int | None:
-        return self._current_estimated_position()
+        return self._estimated_position()
+
+    @property
+    def current_cover_tilt_position(self) -> int | None:
+        if not self._has_tilt:
+            return None
+        return self.coordinator.get_position(self._uid, AXIS_MIDDLE)
 
     @property
     def is_closed(self) -> bool | None:
         pos = self.current_cover_position
         return None if pos is None else pos == 0
 
+    def _lift_direction(self) -> int:
+        """+1 while lifting toward a higher position, -1 while lowering, 0 when not moving."""
+        if not self.coordinator.is_moving(self._uid, AXIS_BOTTOM):
+            return 0
+        target = self.coordinator.get_target(self._uid, AXIS_BOTTOM)
+        actual = self.coordinator.get_position(self._uid, AXIS_BOTTOM)
+        if target is None or actual is None or target == actual:
+            return 0
+        return 1 if target > actual else -1
+
     @property
     def is_opening(self) -> bool | None:
-        if not self._estimation_active():
-            return None
-        assert self._est_target is not None and self._est_start_pos is not None
-        return self._est_target > self._est_start_pos
+        return self._lift_direction() > 0
 
     @property
     def is_closing(self) -> bool | None:
-        if not self._estimation_active():
-            return None
-        assert self._est_target is not None and self._est_start_pos is not None
-        return self._est_target < self._est_start_pos
+        return self._lift_direction() < 0
 
     # --- commands ---------------------------------------------------------------
 
-    async def _async_move_to(self, target: int) -> None:
-        """Send the bottom rail to ``target`` and start the optimistic UI update."""
-        target = max(0, min(100, int(target)))
-        self._start_estimation_for_command(target)
+    async def _async_command(self, *, bottom: int, middle: int) -> None:
+        """Send one composite move and start the optimistic UI update."""
+        bottom, middle = clamp_position(bottom), clamp_position(middle)
+        if bottom > 0 and middle > 0:
+            # The hub would accept it and then reset the vanes anyway; be explicit instead.
+            middle = 0
+        # The estimate starts from where the slider is now, which the previous
+        # command's target still defines, so it is taken before the new command
+        # replaces that target.
+        self._start_estimation(bottom)
+        # Registering must come before _start_animation: the animation only runs
+        # while the coordinator reports the bottom rail moving, which the
+        # pending target guarantees until the hub reflects the command.
+        cmd_id = self.coordinator.register_command(self._uid, bottom=bottom, middle=middle)
         self._start_animation()
         self.async_write_ha_state()
         try:
-            await self.coordinator.api.control(self._uid, bottom=target)
+            await self.coordinator.api.control(self._uid, bottom=bottom, middle=middle)
         except ShadeAutoError as err:
-            raise HomeAssistantError(f"Could not send command to shade {self._uid}: {err}") from err
-        self.coordinator.register_command(self._uid, target)
+            # The hub rejected the command or could not be reached: take the
+            # optimistic state back, or the entity would show "opening" at the
+            # commanded target until the next poll, a verify would retry a
+            # command that never took, and the next close would reuse its vane
+            # target.
+            self.coordinator.discard_command(self._uid, cmd_id)
+            self._clear_estimation()
+            self._cancel_animation()
+            self.async_write_ha_state()
+            raise HomeAssistantError(f"Could not move shade {self.shade_name}: {err}") from err
+        # Read the hub right away: its target now reflects the command, and the
+        # refresh re-arms the poll timer at the faster motion interval.
+        await self.coordinator.async_refresh()
+
+    def _current_tilt_target(self) -> int:
+        target = self.coordinator.get_target(self._uid, AXIS_MIDDLE)
+        if target is None:
+            target = self.coordinator.get_position(self._uid, AXIS_MIDDLE)
+        return target or 0
 
     async def async_set_cover_position(self, **kwargs: Any) -> None:
-        await self._async_move_to(kwargs[ATTR_POSITION])
+        position = clamp_position(kwargs[ATTR_POSITION])
+        # Fully lowering keeps the vanes as they are; any other height closes them (hub rule).
+        middle = self._current_tilt_target() if position == 0 else 0
+        await self._async_command(bottom=position, middle=middle)
 
     async def async_open_cover(self, **kwargs: Any) -> None:
-        await self._async_move_to(100)
+        await self._async_command(bottom=100, middle=0)
 
     async def async_close_cover(self, **kwargs: Any) -> None:
-        await self._async_move_to(0)
+        await self._async_command(bottom=0, middle=self._current_tilt_target())
+
+    async def async_set_cover_tilt_position(self, **kwargs: Any) -> None:
+        await self._async_command(bottom=0, middle=clamp_position(kwargs[ATTR_TILT_POSITION]))
+
+    async def async_open_cover_tilt(self, **kwargs: Any) -> None:
+        await self._async_command(bottom=0, middle=100)
+
+    async def async_close_cover_tilt(self, **kwargs: Any) -> None:
+        await self._async_command(bottom=0, middle=0)
+
+    async def _async_stop(self) -> None:
+        self._clear_estimation()
+        self._cancel_animation()
+        self.coordinator.register_stop(self._uid)
+        self.async_write_ha_state()
+        try:
+            await self.coordinator.api.stop(self._uid)
+        except ShadeAutoError as err:
+            # register_stop has no undo (the stop may well have reached the hub),
+            # so the motion flags stay off until the hub reports its next change,
+            # as they do after a stop that did go through.
+            raise HomeAssistantError(f"Could not stop shade {self.shade_name}: {err}") from err
+        await self.coordinator.async_refresh()
+
+    async def async_stop_cover(self, **kwargs: Any) -> None:
+        await self._async_stop()
+
+    async def async_stop_cover_tilt(self, **kwargs: Any) -> None:
+        await self._async_stop()

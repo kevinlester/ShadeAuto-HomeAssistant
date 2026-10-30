@@ -10,7 +10,7 @@ from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.shadeauto.util import battery_percent, to_int
 
-from .conftest import KITCHEN, FakeHub, make_entry, setup_integration
+from .conftest import BATTERY, BATTERY_LOW, KITCHEN, FakeHub, make_entry, setup_integration
 
 
 @pytest.mark.parametrize(
@@ -44,15 +44,15 @@ async def test_battery_entities_are_diagnostic_and_named_after_the_shade(
     hass: HomeAssistant, hub: FakeHub, integration: MockConfigEntry
 ) -> None:
     registry = er.async_get(hass)
-    battery = registry.async_get(f"sensor.shade_{KITCHEN}_battery")
+    battery = registry.async_get(BATTERY[KITCHEN])
     assert battery is not None
     assert battery.entity_category is EntityCategory.DIAGNOSTIC
-    assert hass.states.get(battery.entity_id).attributes["friendly_name"] == f"Shade {KITCHEN} Battery"
+    assert hass.states.get(battery.entity_id).attributes["friendly_name"] == "Kitchen Battery"
 
-    low = registry.async_get(f"binary_sensor.shade_{KITCHEN}_battery_low")
+    low = registry.async_get(BATTERY_LOW[KITCHEN])
     assert low is not None
     assert low.entity_category is EntityCategory.DIAGNOSTIC
-    assert hass.states.get(low.entity_id).attributes["friendly_name"] == f"Shade {KITCHEN} Battery low"
+    assert hass.states.get(low.entity_id).attributes["friendly_name"] == "Kitchen Battery low"
 
 
 async def test_low_battery_uses_configured_threshold(hass: HomeAssistant, hub: FakeHub) -> None:
@@ -62,8 +62,8 @@ async def test_low_battery_uses_configured_threshold(hass: HomeAssistant, hub: F
     entry.add_to_hass(hass)
     await setup_integration(hass, entry)
 
-    assert hass.states.get(f"sensor.shade_{KITCHEN}_battery").state == "25"
-    assert hass.states.get(f"binary_sensor.shade_{KITCHEN}_battery_low").state == "on"
+    assert hass.states.get(BATTERY[KITCHEN]).state == "25"
+    assert hass.states.get(BATTERY_LOW[KITCHEN]).state == "on"
 
 
 async def test_unknown_battery_value_gives_unknown_states(hass: HomeAssistant, hub: FakeHub) -> None:
@@ -72,5 +72,5 @@ async def test_unknown_battery_value_gives_unknown_states(hass: HomeAssistant, h
     entry.add_to_hass(hass)
     await setup_integration(hass, entry)
 
-    assert hass.states.get(f"sensor.shade_{KITCHEN}_battery").state == "unknown"
-    assert hass.states.get(f"binary_sensor.shade_{KITCHEN}_battery_low").state == "unknown"
+    assert hass.states.get(BATTERY[KITCHEN]).state == "unknown"
+    assert hass.states.get(BATTERY_LOW[KITCHEN]).state == "unknown"

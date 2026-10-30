@@ -11,7 +11,7 @@ import pytest
 from custom_components.shadeauto.const import DEFAULT_POLL, DEFAULT_SEND_SPACING
 from custom_components.shadeauto.options import ShadeAutoOptions
 
-from .conftest import KITCHEN, FakeHub, make_entry, setup_integration
+from .conftest import COVER, KITCHEN, FakeHub, make_entry, setup_integration
 
 
 def test_defaults_when_nothing_is_stored() -> None:
@@ -43,7 +43,7 @@ async def test_setup_survives_a_bad_stored_option(hass: HomeAssistant, hub: Fake
     await setup_integration(hass, entry)
 
     assert entry.state is ConfigEntryState.LOADED
-    assert hass.states.get(f"cover.shade_{KITCHEN}") is not None
+    assert hass.states.get(COVER[KITCHEN]) is not None
     options = entry.runtime_data.coordinator.options
     assert options.poll_seconds == DEFAULT_POLL
     assert options.send_spacing_sec == DEFAULT_SEND_SPACING

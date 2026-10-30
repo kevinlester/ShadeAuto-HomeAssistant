@@ -27,7 +27,7 @@ from homeassistant.exceptions import HomeAssistantError
 import pytest
 from pytest_homeassistant_custom_component.common import MockConfigEntry, async_fire_time_changed
 
-from custom_components.shadeauto.const import AXIS_BOTTOM, DEFAULT_MOTION_POLL, DEFAULT_POLL
+from custom_components.shadeauto.const import AXIS_BOTTOM, DEFAULT_MOTION_POLL, DEFAULT_POLL, MIN_VERIFY_DELAY
 from custom_components.shadeauto.coordinator import ShadeAutoCoordinator
 
 from .conftest import BOTTOM, COVER, DINING, KITCHEN, MIDDLE, MOTOR_STOP, OFFICE, FakeHub, make_entry, setup_integration
@@ -38,7 +38,8 @@ LIFT_ONLY_FEATURES = 15
 IDLE = timedelta(seconds=DEFAULT_POLL)
 # Ticks one second past the motion poll interval, so the scheduled refresh is due whatever stagger HA added.
 MOTION_TICK = DEFAULT_MOTION_POLL + 1
-VERIFY_DELAY = 5
+# The shortest delay the options allow (shorter stored values are raised to it).
+VERIFY_DELAY = MIN_VERIFY_DELAY
 VERIFY_TICK = VERIFY_DELAY + 1
 VERIFY_OPTIONS = {"verify_enabled": True, "verify_delay_sec": VERIFY_DELAY}
 # A 10 s full travel makes Office's 35 -> 100 lift take 6.5 s: two motion polls to cross it.

@@ -46,9 +46,10 @@ class ShadeAutoEntity(CoordinatorEntity[ShadeAutoCoordinator]):
 
     Entity names follow Home Assistant's device-name convention: the shade's
     device carries the hub's name for it, the main cover entity has no name of
-    its own, and the diagnostic entities add a translated suffix. Because of
-    that, ``self.name`` is ``None`` on the cover; use :attr:`shade_name` when a
-    message needs to say which shade it is about.
+    its own, and the other entities (battery, low battery, a two-rail shade's
+    Top cover) add a translated suffix. Because of that, ``self.name`` is
+    ``None`` on the main cover; use :attr:`shade_name` when a message needs to
+    say which shade it is about.
     """
 
     _attr_has_entity_name = True

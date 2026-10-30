@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import timedelta
+from typing import Any
 from unittest.mock import patch
 
 from homeassistant.config_entries import SOURCE_USER
@@ -13,7 +14,7 @@ from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.shadeauto.const import DOMAIN
 
-from .conftest import ALL_UIDS, COVER, HOST, KITCHEN, FakeHub
+from .conftest import ALL_UIDS, COVER, HOST, KITCHEN, FakeHub, make_entry, setup_integration
 
 NEW_HOST = "192.168.3.250"
 
@@ -131,9 +132,11 @@ async def test_options_flow_reloads_entry_with_new_values(
         {
             "poll_seconds": 10,
             "motion_poll_sec": 1.5,
-            "tilt_enabled": False,
+            "tilt_mode": "off",
+            "collision_guard": False,
+            "rail_min_gap": 10,
             "low_battery_threshold": 30,
-            "send_spacing_sec": 0.2,
+            "send_spacing_sec": 2.5,
             "verify_enabled": False,
             "verify_delay_sec": 45,
             "estimation_enabled": False,
@@ -147,8 +150,62 @@ async def test_options_flow_reloads_entry_with_new_values(
     coordinator = integration.runtime_data.coordinator
     assert coordinator.options.poll_seconds == 10
     assert coordinator.options.motion_poll_sec == 1.5
-    assert coordinator.options.tilt_enabled is False
+    assert coordinator.options.tilt_mode == "off"
+    assert coordinator.options.collision_guard is False
+    assert coordinator.options.rail_min_gap == 10
     assert coordinator.options.low_battery_threshold == 30
+    assert coordinator.options.verify_delay_sec == 45
     assert coordinator.update_interval == timedelta(seconds=10)
-    assert coordinator.api.send_spacing_sec == 0.2
+    assert coordinator.api.send_spacing_sec == 2.5  # above 0.4.x's 1.0 s maximum
     assert "current_tilt_position" not in hass.states.get("cover.kitchen").attributes
+
+
+# The test entries turn pacing off (0 s), which the form's 0.15 s minimum
+# rejects; tests that save the form unchanged store a spacing it accepts.
+IN_RANGE_SPACING = {"send_spacing_sec": 0.15}
+
+
+def _form_defaults(result: Any) -> dict[str, Any]:
+    """The options form's fields and their default values."""
+    return {str(key): key.default() for key in result["data_schema"].schema}
+
+
+async def test_options_form_offers_tilt_mode_instead_of_tilt_enabled(hass: HomeAssistant, hub: FakeHub) -> None:
+    """An entry saved by 0.4.x with tilt off opens with tilt mode "off", and saving it drops the old key."""
+    entry = make_entry({"tilt_enabled": False, **IN_RANGE_SPACING})
+    entry.add_to_hass(hass)
+    await setup_integration(hass, entry)
+
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+    defaults = _form_defaults(result)
+    assert "tilt_enabled" not in defaults
+    assert defaults["tilt_mode"] == "off"
+    assert defaults["collision_guard"] is True
+    assert defaults["rail_min_gap"] == 0
+
+    result = await hass.config_entries.options.async_configure(result["flow_id"], {})
+    await hass.async_block_till_done()
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    assert entry.options["tilt_mode"] == "off"
+    assert "tilt_enabled" not in entry.options
+    assert "current_tilt_position" not in hass.states.get(COVER[KITCHEN]).attributes
+
+
+async def test_options_form_can_be_saved_with_a_verify_delay_stored_below_its_minimum(
+    hass: HomeAssistant, hub: FakeHub
+) -> None:
+    """A 0.3.x delay of 10 s would be the form's default and fail its 30 s minimum; it opens as 30 instead."""
+    entry = make_entry({"verify_enabled": True, "verify_delay_sec": 10, **IN_RANGE_SPACING})
+    entry.add_to_hass(hass)
+    await setup_integration(hass, entry)
+    assert entry.runtime_data.coordinator.options.verify_delay_sec == 30
+
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+    assert _form_defaults(result)["verify_delay_sec"] == 30
+
+    # Submitting the form unchanged sends every default back, as the frontend does.
+    result = await hass.config_entries.options.async_configure(result["flow_id"], {})
+    await hass.async_block_till_done()
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    assert entry.options["verify_delay_sec"] == 30
+    assert entry.runtime_data.coordinator.options.verify_delay_sec == 30

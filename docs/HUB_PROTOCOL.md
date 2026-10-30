@@ -1,9 +1,10 @@
 # ShadeAuto hub local HTTP protocol
 
 This document describes what the ShadeAuto (NienMade) shade hub actually does on
-its local HTTP API, as observed on one real hub. It is written for someone who
-maintains the Home Assistant integration in `custom_components/shadeauto/` and
-has never seen the hardware.
+its local HTTP API, as observed on one real hub with five PerfectSheer shades,
+plus what two other projects report for shade families that hub does not have.
+It is written for someone who maintains the Home Assistant integration in
+`custom_components/shadeauto/` and has never seen the hardware.
 
 Nothing here comes from vendor documentation; there is none. Every statement is
 backed by one of these sources, and the source is named next to the claim:
@@ -15,7 +16,11 @@ backed by one of these sources, and the source is named next to the claim:
 | `tests/fixtures/status.json` | A real `/status` reply, captured in the same second as the two above. |
 | `tests/fixtures/error_invalid.json` | The hub's error envelope for a `/GetAllPeripheral` call with `ThingName: null`. |
 | "the log" | [`hub-characterization-2026-10-22.log`](hub-characterization-2026-10-22.log), a timestamped record produced by `tools/hubwatch.py` during the characterization session on 2026-10-22. Each `#####` header is a separate hubwatch run (each starts with a fresh initial snapshot, so changes between runs were not recorded), labelled C1, T2, C3 (also called T1), T3, C2a, C2b, C4a, C4b, C6a, C6b, C6c, C5, C8, C8a, C8b and "restore". The first four were transcribed into the file afterwards from the session's hubwatch output; the rest were appended live. All of them were run against shade 12177 ("Kitchen"). |
-| "session notes" | What the shade's owner reported doing with the physical remote and the vendor app during C5 and C8, and the ~11 s vane-tilt timing seen with an earlier ad-hoc watcher before the log existed. These are not machine-logged and cannot be re-read from a file. |
+| "the 2026-10-23 log" | [`hub-characterization-2026-10-23.log`](hub-characterization-2026-10-23.log), a 200 s probe of the same hub and shade 12177: the `/notification` stream read incrementally, `/status` polled once a second, and one `/control` `{"StatusRequest": 0}` to 12177. Its header says how it was produced. |
+| "session notes" | What the shade's owner reported doing with the physical remote and the vendor app during C5 and C8, and the ~11 s vane-tilt timing seen with an earlier ad-hoc watcher before the log existed. On 2026-10-23: that the vane move to 55 in that log was made in the vendor app. These are not machine-logged and cannot be re-read from a file. |
+| "kedube" | `docs/NORMAN_API.md` in [kedube/ha-norman](https://github.com/kedube/ha-norman), another Home Assistant integration for the same hub. Its author tested a `NienMadeHub` on firmware 6.1.25 with 13 shades of types 32 and 33, captured the vendor app's traffic and read the app's network library; types 48/1 and 80/1 come from users' diagnostics in its issues #2 and #5. Section names are quoted where cited ("Waking a blind", "Cover types", ...). Nothing from it has been reproduced here unless the text says so. |
+| "PR #9" | [kevinlester/ShadeAuto-HomeAssistant pull request #9](https://github.com/kevinlester/ShadeAuto-HomeAssistant/pull/9), two-rail (top-down/bottom-up) support for type 33. Its `docs/TDBU-REGRESSION.md` records a live test on one real type 33 shade on 2026-10-13. |
+| "PR #7" | [kevinlester/ShadeAuto-HomeAssistant pull request #7](https://github.com/kevinlester/ShadeAuto-HomeAssistant/pull/7), vane tilt for a shade whose `ModuleType` it does not name (`TILT_SUPPORT.md`). |
 | `custom_components/shadeauto/*.py` (`api.py`, `const.py`, `coordinator.py`, `cover.py`, `entity.py`, `util.py`), `tools/hubwatch.py`, `README.md` | How the integration and the watch tool build requests and consume replies today. |
 
 Anything that is a guess is marked **unverified**. If you find out more, fix the
@@ -41,7 +46,10 @@ scrubbed to `us-east-1:00000000-0000-0000-0000-000000000000_0000000000000000`.
 from the owner and from `README.md`/`const.py`; the product line is visible in
 `get_all_peripheral.json`, where shade 14500 still carries its factory default
 name `PerfectSheer_38A4`): a lifting bottom rail plus tiltable vanes. The
-protocol calls the vane tilt `MiddleRailPosition`.
+protocol calls the vane tilt `MiddleRailPosition`. On other shade families the
+same field means something else (a second rail, or nothing at all); section 3.1
+lists what is known per family and where it comes from. Unless a passage says
+otherwise, every observation in this document is of a PerfectSheer.
 
 **Transport.**
 
@@ -61,14 +69,16 @@ protocol calls the vane tilt `MiddleRailPosition`.
 **ThingName.** `/registration` returns it. `/GetAllPeripheral` requires it:
 sending `ThingName: null` produces the error envelope in `error_invalid.json`.
 Both clients also send it on `/control`, and the watch tool on
-`/notification`; whether those two actually require it is **unverified**
-(it was never omitted). `/status` and `/registration` were only ever called
-with `{"Timestamp": <seconds>}` and work with that.
+`/notification`. Whether `/control` requires it is **unverified** (it was never
+omitted); kedube found that `/notification` ignores its request body
+altogether (2.5). `/status` and `/registration` were only ever called with
+`{"Timestamp": <seconds>}` and work with that.
 
-**Two reply styles.** `/registration`, `/status` and `/control` answer with a
+**Three reply styles.** `/registration`, `/status` and `/control` answer with a
 flat object that carries `Error` (0 = ok) and the hub's timestamps.
 `/GetAllPeripheral` answers with an envelope
-`{"status": {"code", "error"}, "results": {...}}`. See each endpoint.
+`{"status": {"code", "error"}, "results": {...}}`. `/notification` answers with
+a stream of JSON objects that does not end. See each endpoint.
 
 **Timestamps.** Requests carry `Timestamp` in whole seconds. Replies echo it as
 `RequestTimestamp` (seconds) and add the hub's own clock as `Timestamp` in
@@ -80,9 +90,12 @@ within a second of the hubwatch snapshot line printed right after it (C2a:
 `1792660353684` is 05:12:33.684 local, snapshot 05:12:33; C8a: 05:34:28.971,
 snapshot 05:34:29), and the echoed
 `TaskID` (client milliseconds masked to 31 bits) differs from the hub stamp
-masked the same way by between -8 and +36 ms (C2a 21 ms, C2b 19 ms). Log times
-are the client's wall clock in America/Detroit (EDT, UTC-4). The latencies in
-4.10 and 5.2 rely on this agreement.
+masked the same way by between -8 and +36 ms (C2a 21 ms, C2b 19 ms). The
+2026-10-23 log agrees: the `/control` reply stamp 1792744667098 is 04:37:47.098
+and was printed at 04:37:47, the first event's 1792744669337 is 04:37:49.337
+and was printed at 04:37:49. Log times are the client's wall clock in
+America/Detroit (EDT, UTC-4). The latencies in 2.5, 4.10 and 5.2 rely on this
+agreement.
 
 ---
 
@@ -290,8 +303,8 @@ later. The integration never loads with zero shades because of a bad reply.
 reads `PeripheralName` (falling back to `Name`, then `Shade <uid>`), so the
 names in this reply become the device names;
 `hubwatch.py --names` reads the same key. The `ModuleType`/`ModuleDetail` pair
-from this reply picks the device model string (`entity.py`: `(48, 3)` is shown
-as "PerfectSheer").
+(as strings here, as integers in `/status`) picks the shade's profile (3.1) and
+the device model string (`(48, 3)` is shown as "PerfectSheer").
 
 **Errors.** With `ThingName: null` (which is what the integration sends if it
 calls this before `/registration`), the hub answers (`error_invalid.json`):
@@ -378,9 +391,11 @@ The per-shade fields are described in section 3.
 `motion_poll_sec` (default 2 s) while any shade is moving. It copies the actual
 and target position of both rails plus `BatteryVoltage`, `ModuleType`,
 `ModuleDetail` and `FirmwareVersion` per shade (`STATUS_FIELDS` in
-`coordinator.py`), and a shade counts as moving while actual != target on either axis
-(`AXIS_FIELDS`, `is_moving`). After a `MotorStop` the entity stops showing
-motion at once, but the coordinator keeps polling at the motion interval
+`coordinator.py`), and a shade counts as moving while actual != target on an
+axis its profile tracks (`AXIS_FIELDS`, `is_moving`): both rails on
+PerfectSheer and two-rail shades, the bottom rail only on single-rail and
+legacy shades, whose middle target can sit at 100 forever while the rail reads
+0 (3.1). After a `MotorStop` the entity stops showing motion at once, but the coordinator keeps polling at the motion interval
 until the hub reports the stop point (target == actual) or the motion
 failsafe elapses, because the hub takes about 35 s to rewrite the target
 (4.6). The cover position and tilt, the opening/closing direction, the
@@ -399,17 +414,23 @@ as the hub's target stops matching the target it is estimating toward.
 ### 2.4 `/control`
 
 Send a command to one shade. Full semantics are in section 4; this section is
-only the wire format. Five rules you must know before sending anything:
+only the wire format. Six rules you must know before sending anything:
 
 1. Always send `BottomRailPosition`. A payload with `MiddleRailPosition` alone
    is rejected with `Error: 2` (4.2).
-2. Omitting `MiddleRailPosition` sets the vane target to 0, i.e. closes the
-   vanes (4.3).
-3. Vanes are only honoured while the bottom target is 0. You may send both
-   fields in one command; the shade lowers, then tilts (4.4).
+2. Omitting `MiddleRailPosition` sets the middle target to 0. On a PerfectSheer
+   that closes the vanes (4.3); on a two-rail shade it sends the top rail to
+   the bottom (3.1).
+3. PerfectSheer vanes are only honoured while the bottom target is 0. You may
+   send both fields in one command; the shade lowers, then tilts (4.4).
 4. The hub does not validate 0-100; clamp yourself (4.5).
 5. `MotorStop: 170` stops the motor, and the hub then re-targets the shade to
    wherever it stopped (4.6).
+6. `StatusRequest: 0` with a `PeripheralUID` makes that one shade report in
+   without moving. Without a `PeripheralUID` it becomes a hub-wide report-in,
+   and a hub-wide report-in closed one user's roller shades, so never send it
+   unscoped. Never send `ReportBatteryLevel` at all: a `PeripheralUID` does not
+   confine it to one shade (4.6).
 
 **Request** (as `hubwatch.build_control_payload` and
 `ShadeAutoApi._send_control` build it: `PeripheralUID`, `TaskID` and
@@ -432,7 +453,7 @@ only the wire format. Five rules you must know before sending anything:
 | `TaskID` | always sent | Client-chosen integer; the hub echoes it in the reply. The integration uses `int(time.time()*1000) & 0x7FFFFFFF` (section 4.7). Whether the hub rejects a missing TaskID is **unverified**. |
 | `Timestamp` | always sent | Whole seconds; echoed as `RequestTimestamp`. Whether it is validated is **unverified**. |
 | `ThingName` | always sent when known | Whether `/control` requires it is **unverified**. |
-| command fields | one or more | `BottomRailPosition`, `MiddleRailPosition`, `MotorStop`. `MiddleRailPosition` is rejected unless `BottomRailPosition` is also present (4.2); omitting `MiddleRailPosition` sets the vane target to 0 (4.3). Section 6 lists the other field names the hub knows; most are limit, calibration or pairing commands and must not be sent. |
+| command fields | one or more | `BottomRailPosition`, `MiddleRailPosition`, `MotorStop`, `StatusRequest`. `MiddleRailPosition` is rejected unless `BottomRailPosition` is also present (4.2); omitting `MiddleRailPosition` sets the middle target to 0 (4.3). `StatusRequest` goes alone, with value 0 (4.6). Section 6 lists the other field names the hub knows; most are limit, calibration or pairing commands and must not be sent. |
 
 **Success response** (log C2b). The hub echoes the position fields it stored as
 targets, which includes a `MiddleRailPosition: 0` the request did not contain
@@ -463,95 +484,175 @@ the reply's `Error` is non-zero, so an `Error: 2` rejection reaches callers as
 an exception, not as a returned dict. The cover entity turns that exception,
 like a connection error, into a `HomeAssistantError` naming the shade
 ("Could not move shade Kitchen: ...") and drops its optimistic state at once,
-so the entity shows the hub's last known position instead of "opening". The
-cover entity (`cover.py`) passes both
-fields on every open, close, set-position and tilt call: lowering to 0 and
-close keep the current vane target, any other height sends
-`MiddleRailPosition: 0` explicitly (4.4 would reset it anyway), and tilt
-commands send `BottomRailPosition: 0`. The verify-and-retry logic resends the
-same pair, once, and only when the hub never reflected the targets it was
-sent; a retry overtaken by a newer command does not overwrite that command's
-pending state.
+so the entity shows the hub's last known position instead of "opening". What
+the cover entity (`cover.py`) sends depends on the shade's profile (3.1):
+
+- **PerfectSheer:** both fields on every open, close, set-position and tilt
+  call. Lowering to 0 and close keep the current vane target, any other height
+  sends `MiddleRailPosition: 0` explicitly (4.4 would reset it anyway), and
+  tilt commands send `BottomRailPosition: 0`.
+- **Single-rail and legacy:** `BottomRailPosition` only, as 0.3.0 did. The
+  implied `MiddleRailPosition: 0` (4.3) is harmless on a shade whose middle
+  rail always reads 0.
+- **Two-rail:** both rails on every command. The rail the user did not touch
+  is held where it is heading (our pending target, else the hub's target, else
+  its position), unless the collision guard has to move it to keep the top
+  rail at or above the bottom rail. When that position is not known (the hub
+  has not reported the rail, or we stopped the shade and the hub has not yet
+  reported where that rail stopped) the command is refused instead of sent
+  (see `docs/ARCHITECTURE.md`).
+
+The verify-and-retry logic resends the same payload, once, and only when the
+hub never reflected the targets it was sent; a retry overtaken by a newer
+command does not overwrite that command's pending state.
 
 ### 2.5 `/notification`
 
-A long-poll that is supposed to deliver change events.
+A push stream. The hub keeps the response open and writes one small JSON object
+each time a shade's target or position changes.
 
-**Request** (as `hubwatch.py --notify` sends it; the integration no longer
-calls this endpoint)
+> **Correction, 2026-10-23.** Up to 0.4.x this section said that the hub never
+> delivers notifications, and 0.4.0 removed the integration's `/notification`
+> code because of it. That was wrong. The fault was in how our clients read the
+> reply, not in the hub; "What we concluded on 2026-10-22, and why it was
+> wrong" below has the details. The integration does not use the stream yet
+> (0.5.0); push updates are planned for 0.6.0.
+
+**Request** (as `tools/hubwatch.py --notify` and the 2026-10-23 probe send it;
+the values are illustrative)
 
 ```json
-{"ThingName": "us-east-1:00000000-0000-0000-0000-000000000000_0000000000000000", "Timestamp": 1792660684, "Timeout": 50.0}
+{"ThingName": "us-east-1:00000000-0000-0000-0000-000000000000_0000000000000000", "Timestamp": 1792744658, "Timeout": 300}
 ```
 
-`Timestamp` is presumably a watermark ("events since") and `Timeout` the number
-of seconds the hub may hold the connection. Both meanings are inherited from
-the previous integration and are **unverified**: no event was ever returned,
-hubwatch simply sends the current time as `Timestamp` on every poll, and the
-hub did not visibly honour the hold (see below). The example values are
-illustrative; hubwatch does not log the payload. Whether any other `Timeout`
-value (a longer hold, or `-1` for "indefinitely") behaves differently is
-**unverified**; only 50 was tried.
+The body seems to make no difference. kedube found that the hub ignores all
+three fields: an empty body works, a stream opened with `Timeout: 5` was still
+open 15 s later, and a `Timestamp` from before an event replayed nothing
+("POST /NM/v1/notification", 2026-10-15). Only the body above has been tried
+here.
 
-**Response.** **No event was ever received.** During the C5 run the watch tool
-polled with `Timeout: 50` continuously; every poll ended without a body, logged
-as `NOTIFY (hub returned without an event)` at 05:19:04, 05:20:04, 05:21:04,
-05:22:04 and 05:23:19. Those polls covered the physical-remote phase of C5.
-The vendor-app phase (05:23:36 to 05:24:05) fell inside the poll started at
-05:23:19, whose end is not in the log; the session notes say that no event came
-for the app's changes or for our own `/control` commands either.
+**Response** (2026-10-23 log). `HTTP 200`, `Content-Type:
+application/octet-stream`, `Transfer-Encoding: chunked`. The hub writes the
+first object at once:
 
-Look at the spacing: the notify thread started with the watch at 05:18:04, and
-four of the five polls ended exactly 60 s after the previous one, which is
-hubwatch's client-side socket timeout (`Timeout + 10`, `hubwatch.py`), not the
-50 s hold that was requested; the fifth took 75 s and is unexplained.
-`hubwatch.Hub.notification()` returns `""` both for an empty body and for a
-client-side timeout, so the log cannot prove which ended each poll, but a hub
-that answered at the requested hold would have produced about 50 s spacing. The
-most likely reading is that the client gave up while the hub still held the
-connection. The log therefore cannot show the hub ever answering a
-`/notification` request at all, with or without a body, and whether it honours
-`Timeout` is **unverified**. Any client must impose its own timeout on this
-call. What is certain is that no event was delivered during a window that
-contained a remote move.
+```json
+{"Error": "Success."}
+```
 
-The event format the previous integration expected (one or more concatenated
-JSON objects with a `PeripheralList` array and a `Status` or `Timestamp` key)
-is **unverified**; nothing matching it was ever observed.
+`Error` is a **string** here, unlike the integer `Error` of the other
+endpoints, so a client that checks `Error == 0` would treat the stream as
+failed. Then the hub keeps the response open and writes one more object per
+change:
 
-**What the integration uses it for.** Nothing. The previous integration
-long-polled here while a command was pending; that code is gone, `api.py` has
-no notification method and the options no longer include a notification
-timeout. The current coordinator relies on `/status` polling only.
-`tools/hubwatch.py --notify` is the only client that still calls this endpoint.
-`README.md` ("Upgrading from 0.3.x") records that the "Notification timeout"
-option was removed for the same reason.
+```json
+{"Status": 1792744669337, "PeripheralList": [12177]}
+```
 
-**Errors.** None observed.
+- `Status` is the hub's clock in milliseconds, not a status code.
+- `PeripheralList` holds shade **ids**, not records: the event says *which*
+  shades changed, not *what* changed. Read `/status` to find out.
+- There is no framing. No newline, length or separator comes between objects,
+  so the reader has to split the bytes itself (`StreamSplitter` in
+  `hubwatch.py` uses `json.JSONDecoder().raw_decode`). The 2026-10-23 log does
+  not record how the bytes were split across reads, so assume nothing: one
+  read can end inside an object or hold several.
+- The hub does not end the response. In the 2026-10-23 log the one stream
+  stayed open, with no EOF and no error, for the whole 200 s probe. **A client
+  that reads the body to the end waits forever.** Read whatever has arrived
+  (`read1` in `http.client`) and process it as it comes.
+
+What produced an event in the 2026-10-23 log (shade 12177; hub times shown on
+the client's clock, which agreed with the hub to well under a second):
+
+| Event (`Status`) | Cause | What `/status` showed |
+|---|---|---|
+| 04:37:49.337 | `{"PeripheralUID": 12177, "StatusRequest": 0}`, accepted 2.2 s earlier (reply stamp 04:37:47.098) | Per-shade `Timestamp` 1792731364 (00:56:04) -> 1792744669 (04:37:49). No position or target changed and nothing moved. |
+| 04:39:04.841 | A vane move to 55 made in the vendor app (session notes); the hub took the new target | `TargetMiddleRailPosition 0 -> 55` at the next poll. Per-shade `Timestamp` unchanged. |
+| 04:39:26.350 | The move finished, 21.5 s later | `MiddleRailPosition 0 -> 55` and per-shade `Timestamp` -> 1792744766 (04:39:26) at the next poll. |
+
+So a command the hub accepts produces one event at once (the target changed)
+and another when the shade reports the end of the move (the position changed),
+and a shade reporting in with nothing changed produces one too. kedube reports
+the same pattern for its own commands and for app moves ("Notification stream,
+as observed"), and also says remote moves produce events. That last part is
+**unverified** here: the 2026-10-23 probe had no remote move, and 5.4 shows the
+hub does not always learn of remote moves at all.
+
+Reported by kedube and **not yet seen on this hub**:
+
+- Events that happen while no stream is open are not replayed when one is
+  opened. After connecting or reconnecting, read `/status` to catch up.
+- Long-lived streams have been seen to go quiet, so kedube closes and reopens
+  its stream every 300 s and treats an unexpected EOF as a disconnect.
+  `hubwatch.py` reopens a stream that has been silent for 300 s, or that ended
+  or failed, after a 2 s back-off.
+- Changes made in the app other than moves arrive as `UpdateTime` objects, for
+  example `{"UpdateTime": {"peripheral": ...}, "Timestamp": <ms>}` after a shade
+  is renamed (also `"room"`, `"device"` for the hub's name, and `"schedule"`).
+  A client re-reads `/GetAllPeripheral` on one to pick up new names.
+
+**What we concluded on 2026-10-22, and why it was wrong.** *This conclusion is
+superseded; the evidence is kept because it explains the mistake.* During the
+C5 run `hubwatch.py --notify` long-polled with `Timeout: 50` the whole time.
+Every request ended empty, logged as `NOTIFY (hub returned without an event)`
+at 05:19:04, 05:20:04, 05:21:04, 05:22:04 and 05:23:19, and the session notes
+said no event came for the app's changes or for our own commands either. From
+that, this section concluded that the hub never delivers notifications. The
+README, the 0.4.0 changelog and `ARCHITECTURE.md` repeated it, and 0.4.0
+removed the integration's long-poll and its `notification_timeout_sec` option.
+
+The hub was answering all along. The 0.4.0 `hubwatch.py` read each reply with
+`urllib`'s `read()`, which returns only at the end of the body, and this body
+never ends. So every request waited for the 60 s socket timeout
+(`Timeout + 10`) and then returned `""`, throwing away the
+`{"Error": "Success."}` and any events that had arrived. That is why four of
+the five requests ended exactly 60 s after they started (the notify thread
+started at 05:18:04). The old text did suspect that the client was giving up
+while the hub still held the connection, but not that the hub had been writing
+to it all along.
+The fifth took 75 s. The socket timeout restarts whenever bytes arrive, so
+something was probably written to the stream about 15 s into that request,
+during the remote phase of C5; what it was cannot be known, because it was
+discarded (**unverified**). The integration before 0.4.0 had the same flaw:
+0.3.0's `ShadeAutoApi.notification()` read the reply with aiohttp's
+`resp.text()`, also to the end, behind a socket read timeout of
+`notification_timeout_sec` (default 2 s), and returned `""` when that expired.
+Neither client could ever have shown an event.
+
+**What the integration uses it for.** Nothing yet; 0.5.0 learns everything by
+polling `/status` (2.3). Push updates are planned for 0.6.0: an event would
+trigger an immediate `/status` read instead of waiting for the next poll, with
+a per-shade `StatusRequest` before a retry (4.6). `tools/hubwatch.py --notify`
+is the only client in this repository that calls the endpoint.
+
+**Errors.** None observed. The first object's `Error` was `"Success."`; other
+values are **unverified**.
 
 ---
 
 ## 3. Shade status record
 
-Every element of `Peripherals` in a `/status` reply has exactly these fields
-(`status.json`).
+Every element of `Peripherals` in a `/status` reply from this hub's
+PerfectSheer shades has exactly these fields (`status.json`). Other families
+add or drop some; kedube lists `RssiMean` and `StallCurrent` on types 32 and
+33, and `Position` for shutters ("Observed fields").
 
 | Field | Type | Units / range | Meaning | Integration uses it? |
 |---|---|---|---|---|
 | `PeripheralUID` | int | | The shade's id. Key for `/control` and for matching `/GetAllPeripheral`. | Yes (entity identity). |
-| `ModuleType` | int | 48 observed | Device class code. Same number as the hub's `DeviceType`. Meaning **unverified**. | Copied into the coordinator data. The device model string is derived from the same pair as reported by `/GetAllPeripheral` (`entity.py`: (48, 3) is "PerfectSheer"). |
-| `ModuleDetail` | int | 3 observed | Sub-type; all five PerfectSheer shades report 3. Meaning **unverified**. | See `ModuleType`. |
+| `ModuleType` | int | 48 observed | Shade family (product line). 48 here; kedube lists 1, 32, 33, 48, 49 and 80 from the vendor app (3.1). The hub's own `DeviceType` is also 48; whether that means anything is **unverified**. | Yes: with `ModuleDetail` it picks the shade's profile (3.1) and the device model string. |
+| `ModuleDetail` | int | 3 observed | Product within the family; all five PerfectSheer shades report 3 (3.1). | See `ModuleType`. |
 | `RoomID` | int | | Matches `RoomList[].RoomID` in `/GetAllPeripheral`. | No. |
 | `GroupID` | int | | Matches `GroupList[].GroupID`. | No. |
 | `BatteryVoltage` | int | percent, 0-100 | **A percentage despite the name.** 100 observed on every shade. `battery_percent()` treats values outside 0-100 as unknown. | Yes (battery sensor, low-battery flag). |
 | `TargetBottomRailPosition` | int | 0-100 (not enforced, see 4.5) | The lift target the hub currently holds. Changes the moment a command is accepted via `/control` or the vendor app. Remote-driven moves are different: the target was either never updated (C5) or updated together with the actual once the shade stopped (C8); see 5.4. | Yes (motion tracking: moving while actual != target; opening/closing direction). |
-| `TargetMiddleRailPosition` | int | 0-100 (not enforced) | The vane target the hub currently holds. Set by `/control` and app commands, also rewritten by the hub itself (sections 4.3, 4.4); for remote moves see 5.4. | Yes (motion tracking). |
+| `TargetMiddleRailPosition` | int | 0-100 (not enforced) | The vane target the hub currently holds (the upper rail's target on two-rail shades, 3.1). Set by `/control` and app commands, also rewritten by the hub itself (sections 4.3, 4.4); for remote moves see 5.4. | Yes (motion tracking). |
 | `BottomRailPosition` | int | 0-100 | Actual lift. **0 = fully lowered, 100 = fully raised.** Only updated when motion ends. | Yes (cover position). |
-| `MiddleRailPosition` | int | 0-100 | Actual vane tilt on PerfectSheer. **0 = vanes closed, 100 = vanes open** (light through). Intermediate values are real: `status.json` shows shade 12177 at 50. Only updated when motion ends. | Yes (cover tilt position while `tilt_enabled`, the default; motion tracking). |
+| `MiddleRailPosition` | int | 0-100 | Actual vane tilt on PerfectSheer. **0 = vanes closed, 100 = vanes open** (light through). Intermediate values are real: `status.json` shows shade 12177 at 50. Only updated when motion ends. Other families: 3.1. | Yes, by profile: tilt position on PerfectSheer (unless `tilt_mode` is off), the top rail's position on two-rail shades, ignored on single-rail and legacy shades. |
 | `SpeedInformation` | int | 0 observed | Never changed during any move in the log (it is one of the fields `hubwatch.py` diffs on every poll, `DEFAULT_FIELDS`). 15 in the registration template. Meaning **unverified**. | No. |
 | `CalibrationState` | int | 0 observed | Never changed in the log (also a diffed field). 1 in the registration template. Meaning **unverified**. | No. |
 | `FirmwareVersion` | string | `"2.4.1"` | Shade motor firmware. | Yes (device `sw_version`). |
-| `Timestamp` | int | seconds | Differs per shade and is older than the reply's own timestamps, so it is probably the time this record last changed. **Unverified.** | No. |
+| `Timestamp` | int | seconds | **When the hub last heard from the shade**, not when the record last changed. In the 2026-10-23 log a `StatusRequest` moved it from 1792731364 to 1792744669, the second of the stream event, with nothing else changing; a new target from the app left it alone; the end of that move set it to 1792744766, again the second of the event. kedube reports the same ("Waking a blind"). | No. |
 
 Top-level fields of the `/status` reply:
 
@@ -567,21 +668,131 @@ Top-level fields of the `/status` reply:
 | `RequestTimestamp` | int | Echo of the request `Timestamp` (seconds). |
 | `Timestamp` | int | Hub clock, milliseconds. |
 
+### 3.1 Shade families: what `MiddleRailPosition` means
+
+`ModuleType` names the shade family and `ModuleDetail` the product within it.
+The same two rail fields mean different things per family, so the integration
+(0.5.0) maps each pair to a *profile*, and the profile decides which entities
+exist and what is sent (`docs/ARCHITECTURE.md`, "Shade profiles").
+
+Only the PerfectSheer row was verified by this project. Every other row rests
+on the source named in it, and none has been tried with this integration. If
+you own one of those shades, the notes below say what to check.
+
+| `ModuleType`/`ModuleDetail` | Product (vendor app's name) | What `MiddleRailPosition` is | Source | Profile |
+|---|---|---|---|---|
+| 48/3 | PerfectSheer | Vane tilt, 0 closed .. 100 open, honoured only while the bottom target is 0 (4.4) | This hub, five shades (fixtures, 2026-10-22 log) | `sheer` |
+| 49/3 | PerfectSheer, second-generation module | Assumed as 48/3 | kedube: vendor app only | `sheer` |
+| 32/0, 32/2 | Cellular shade | Nothing; reads 0 | kedube: 32/2 on real hardware, 32/0 vendor app only | `single_rail` |
+| 48/1, 48/2 | Roller shade, Roman shade | Nothing; reads 0, but app presets can leave the *target* at 100 | kedube: 48/1 from users' diagnostics (its issues #2, #5), 48/2 vendor app only | `single_rail` |
+| 49/1, 49/2 | As 48/1, 48/2 (second-generation module) | Assumed as 48/1, 48/2 | kedube: vendor app only | `single_rail` |
+| 32, 48, 49 with any other detail | Not known | Assumed as the rest of the family | None | `single_rail`, no warning |
+| 33/x | Cellular shade with two rails: day/night or top-down/bottom-up | The upper rail's height, on the same axis as the bottom rail | kedube: 33/3 on real hardware, 33/4-5 vendor app only; PR #9: one real type 33 shade | `two_rail` |
+| 32/3, 32/4, 32/5 | Cellular shade, top-down/bottom-up | As 33 | kedube: vendor app only (the app draws two sliders) | `two_rail` |
+| 80/x | SmartDrape | Vanes in seven stops, open at 50, closed at 0 and 100 | kedube: 80/1 from one user's diagnostics (issue #2); PR #7 matches | `legacy` |
+| 1/x | Shutter | No rails; the louvres are a separate `Position` field, 0-7 | kedube: vendor app only | `legacy` |
+| 32, 48, 49 without a `ModuleDetail` | Cannot be told | Unknown | | `legacy`, with a warning in the log |
+| anything else | | Unknown | | `legacy`, with a warning in the log |
+
+**PerfectSheer (48/3, 49/3).** Sections 2 and 4 describe this family. The
+middle rail is the vane angle; the vanes open only while the shade is fully
+lowered, the hub rewrites the vane target to 0 otherwise (4.4), and a command
+without `MiddleRailPosition` closes them (4.3). kedube's app decoding says the
+vendor app also calls 49/3 PerfectSheer and handles family 49 like 48 ("Cover
+types"); no 49/3 is known to have been seen on a hub, so its behaviour is
+assumed, not verified.
+
+**Single-rail families (32/0, 32/2, 48/1, 48/2, 49/1, 49/2).** Only the bottom
+rail moves, and `MiddleRailPosition` always reads 0 (kedube: every 32/2 on its
+13-shade hub, target 0 as well; 48/1 in its issues #2 and #5). The middle
+*target* is less tidy: in issue #2 the app's presets left
+`TargetMiddleRailPosition` at 100 on every shade while the rail stayed at 0. A
+client that tracks the middle rail then sees the shade as moving forever, and
+one that verifies it keeps retrying; kedube says that is how it found type 48.
+0.3.0 sent `BottomRailPosition` alone to every shade, and PR #9 keeps that for
+single-rail shades (its test `test_single_rail_payload_is_unchanged`); the
+implied `MiddleRailPosition: 0` (4.3) is harmless on a shade without a middle
+rail. kedube instead sends both rails to every type and reports the hub
+accepts that equally ("POST /NM/v1/control"); not tried here.
+
+**Two-rail families (33/x, 32/3-5).** `BottomRailPosition` is the bottom rail's
+height and `MiddleRailPosition` the upper rail's height, on the same axis:
+0 = lowered, 100 = raised. Fully covered is bottom 0 / middle 100 (the fabric
+spans the window), fully open is 100 / 100 (both rails stacked at the top), and
+bottom 0 / middle 40 is a top-down position that lets light in above the
+fabric. The upper rail must stay at or above the bottom rail. Sources:
+
+- PR #9 measured the axis on one real type 33 shade: its first version
+  inverted the upper rail, the fix states "Both hub fields measure rail height:
+  0=lowered, 100=raised", and its live test (`docs/TDBU-REGRESSION.md`,
+  2026-10-13) sent `open_cover` to the bottom rail of a shade at 35 / 35, which
+  ended at 100 / 100 and was confirmed physically fully open.
+- kedube: the vendor app's "Best privacy" preset sets bottom 0 / middle 100
+  and "Best view" 100 / 100 ("Room-wide and hub-wide control"); on 2026-10-10
+  a room-wide command with bottom 0 / middle 100 put two type 33 shades back in
+  their starting position ("POST /NM/v1/control"); and 33/3 shades are
+  day/night shades whose middle rail "tracks 0-100" ("Cover types").
+  `/status` reports `Target*` fields for them as for PerfectSheer.
+- The hub rule that a command without `MiddleRailPosition` sets the middle
+  target to 0 (4.3, verified here on PerfectSheer) means a bottom-only command
+  sends the upper rail to the bottom. PR #9 says the same of type 33 ("a
+  bottom-only payload implies MiddleRailPosition=0"). So 0.3.0 (bottom-only)
+  and 0.4.0 (which sent `MiddleRailPosition: 0` with every raise) would both
+  have pulled the upper rail down on these shades. That is an inference; we
+  have no report of it happening.
+
+There is one `MotorStop` per shade and no known per-rail stop. kedube saw a
+type 33 shade report where it stopped 2.8 s after a stop (2026-10-15), much
+faster than a PerfectSheer's ~35 s (4.6). 32/3-5 are two-rail only because the
+vendor app draws two sliders for them (kedube, "Cover types"); no one is known
+to have seen one on a hub.
+
+**SmartDrape (80/x).** kedube, from one user's diagnostics (issue #2): the
+bottom rail is how far the drape is drawn, and the middle rail is the vane
+openness in seven stops (0, 17, 33, 50, 66, 83, 100), open at 50 and closed at
+both ends. PR #7 adds tilt for a shade it does not identify, with the same
+shape: 0 and 100 are closed in opposite directions, 50 is open, and the motor
+resets the tilt to about 17 when the drape moves. That matches kedube's
+SmartDrape, but PR #7 gives no `ModuleType`, so the match is an inference.
+0.5.0 gives SmartDrapes the `legacy` profile (lift only, bottom-only commands,
+no tilt), because neither the tilt scale nor what a bottom-only command does to
+the vanes (by 4.3 probably sends them to 0, closed) has been checked with this
+integration.
+
+**Shutter (1/x).** kedube, from the vendor app's library only: no rails; the
+louvres are one `Position` field, 0-7 (7 shut, 3 horizontal), sent alone. The
+`legacy` profile sends `BottomRailPosition`, which a shutter presumably
+ignores (**unverified**). Louvre control is not supported.
+
+**Anything else.** `legacy`: lift only, bottom-only commands, and a warning in
+the log asking the user to report the type (SmartDrapes and shutters get the
+same profile without the warning). Other details of types 32, 48 and 49 are
+not "anything else": they get `single_rail` without a warning, like the rest
+of their family; only a 32, 48 or 49 reported without a `ModuleDetail` falls
+back to `legacy`, because which product it is cannot be told. The pair comes
+from `/GetAllPeripheral`, with `/status` filling in a missing value, and the
+warning names the pair and every shade that reports it, once per setup.
+If you see it, open an issue with
+the `ModuleType`/`ModuleDetail` pair (the device page shows it as
+"Shade (type X/Y)"), what the shade is, and a `/status` record from
+`tools/hubwatch.py --raw`.
+
 ---
 
 ## 4. Control semantics
 
-Everything in this section was learnt by sending commands to shade 12177 and
-watching `/status` at 1 s intervals. The table at the end of the section lists
-the raw evidence.
+Unless a passage names another source, everything in this section was learnt
+by sending commands to shade 12177, a PerfectSheer, and watching `/status` at
+1 s intervals. The table at the end of the section lists the raw evidence.
 
-### 4.1 The three command fields that matter
+### 4.1 The command fields that matter
 
 | Field | Value | Effect |
 |---|---|---|
 | `BottomRailPosition` | 0-100 | Move the bottom rail. 0 lowers fully, 100 raises fully. |
-| `MiddleRailPosition` | 0-100 | Set the vane tilt. 0 closed, 100 open. Only meaningful when the shade is fully lowered (4.4). |
+| `MiddleRailPosition` | 0-100 | PerfectSheer: set the vane tilt, 0 closed, 100 open, only meaningful when the shade is fully lowered (4.4). Two-rail shades: move the upper rail (3.1). |
 | `MotorStop` | 170 | Stop whatever the motor is doing right now. |
+| `StatusRequest` | 0, with `PeripheralUID` | Ask that one shade to report in. Nothing moves (4.6). |
 
 The hub accepts both position fields in one request. In C2b the shade was at
 bottom 50 / vanes 0; `{"BottomRailPosition": 0, "MiddleRailPosition": 100}`
@@ -596,6 +807,12 @@ actuals in the same update (`BottomRailPosition 50 -> 0` and
 rejected with `Error: 2` and nothing changes** (log C1 and T3; the reply shape
 is in 2.4). To tilt the vanes you must always also send the bottom
 position, even if it is the position the shade is already at.
+
+kedube reports the opposite: that the vendor app's group screen sends
+`MiddleRailPosition` alone and the hub accepts it ("POST /NM/v1/control"). Here
+it was rejected both times it was tried, on a PerfectSheer addressed by
+`PeripheralUID`. Whether the rule differs by family or by how the command is
+addressed is **unverified**; send `BottomRailPosition` every time.
 
 ### 4.3 The default-middle-to-0 rule
 
@@ -613,17 +830,20 @@ it as `MiddleRailPosition: 0`.** Evidence:
 
 The implicit `MiddleRailPosition: 0` is tied to `BottomRailPosition`: the
 replies to `MotorStop`-only (C4b), `RequestModuleInfo`-only (C8a) and
-`StatusRequest`-only (C8b) payloads contain no `MiddleRailPosition` at all.
+`StatusRequest`-only (C8b, and the 2026-10-23 log) payloads contain no
+`MiddleRailPosition` at all.
 Whether a stop leaves a non-zero vane target alone is **unverified** (the vane
 target was already 0 in C4b, C8a and C8b, so `/status` cannot tell).
 
 Consequence: **a client that sends `BottomRailPosition` alone closes the
-vanes.** Callers of `ShadeAutoApi.control()` must pass the vane value they want
-to keep as `middle`. The cover entity therefore always sends both fields: the
+vanes** of a PerfectSheer, and, by the same rule, sends the upper rail of a
+two-rail shade to the bottom (3.1; not verified on such a shade here). Callers
+of `ShadeAutoApi.control()` must pass the middle value they want to keep as
+`middle`. The PerfectSheer cover therefore always sends both fields: the
 current vane target when lowering to 0 or closing, and an explicit
 `MiddleRailPosition: 0` for any other height (4.4 would reset it anyway).
 
-### 4.4 Vanes are only honoured at bottom 0
+### 4.4 Vanes are only honoured at bottom 0 (PerfectSheer)
 
 A `MiddleRailPosition` target is accepted whatever the bottom position is, but
 the hub only keeps it when the bottom target is 0 (C2b, C5, "restore"); the
@@ -672,7 +892,7 @@ does this, and `ShadeAutoApi.control()` applies it to both fields before
 sending, so nothing above the API layer can send an out-of-range value; the
 cover entity clamps its inputs with the same helper.
 
-### 4.6 MotorStop and the other "170" fields
+### 4.6 MotorStop, StatusRequest and the other action fields
 
 `{"MotorStop": 170}` on its own is accepted (`{"PeripheralUID": 12177,
 "MotorStop": 170, "Error": 0, ...}`, C4b) and stops the motor. Sent 8.5 s into a
@@ -682,19 +902,56 @@ hub reported, in one update, `BottomRailPosition 0 -> 25`,
 **after a stop the hub rewrites the target to the actual position**; a client
 should not expect the old target to survive.
 
-`{"RequestModuleInfo": 170}` (C8a) and `{"StatusRequest": 170}` (C8b) were both
-accepted with `Error: 0` and echoed, and **no effect was observed**: no status
-change was logged before the next command was sent (40 s after C8a, about
-three minutes after C8b); the log does not record how long each watch kept
-polling. (The log does print a `TargetMiddleRailPosition 100 -> 0` line under
-the C8a header; its timestamp, 05:34:16.528, is the C8 remote-move update
-printed late, not a C8a effect.) They did no harm either. What they are for is
-**unverified**.
+**`StatusRequest: 0` makes one shade report in.** In the 2026-10-23 log,
+`{"PeripheralUID": 12177, "StatusRequest": 0}` (plus `TaskID`, `Timestamp`,
+`ThingName`) was answered `{"PeripheralUID": 12177, "StatusRequest": 0,
+"Error": 0, ...}` with hub stamp 04:37:47.098. 2.2 s later the stream carried
+`{"Status": 1792744669337, "PeripheralList": [12177]}` (2.5), and the next
+`/status` showed the shade's `Timestamp` moved from 1792731364 (00:56:04, when
+the hub had last heard from it) to 1792744669 (04:37:49). No position or target
+changed and the shade did not move. kedube describes the same request as the
+vendor app's per-shade refresh, captured from the app on 2026-10-14, with the
+shade's `Timestamp` moving within 5-10 s in its tests ("Waking a blind").
+
+Why it matters: a report-in is how the hub corrects a stale position. kedube
+saw the hub keep a wrong `MiddleRailPosition` for an hour until the shades
+reported in, and a shade that accepted a move but did not go keep "old position,
+new target" until it was asked; a report-in also overwrites the target with the
+actual position ("Waking a blind"). A per-shade `StatusRequest` before a retry
+is planned for 0.6.0; 0.5.0 does not send it.
+
+**Only ever send it with a `PeripheralUID`.** kedube found that without one,
+`StatusRequest` becomes a hub-wide report-in (a `RoomID` alone does not confine
+it), and that a hub-wide report-in can move shades: on one user's hub
+(its issue #5, three type 48/1 roller shades, hub 6.1.25, motors 2.4.1) a
+hub-wide `ReportBatteryLevel` followed by a `StatusRequest` to each shade
+closed the shades twice, with no move command sent; lone per-shade
+`StatusRequest`s closed nothing there, so the hub-wide request was the likely
+trigger. On another hub a `ReportBatteryLevel` closed nine type 33 shades.
+`ReportBatteryLevel` is not confined by a `PeripheralUID` either (kedube's
+isolated tests of 2026-10-14 moved shades in other rooms), so this project never
+sends it.
+
+**The 2026-10-22 test with 170 did not show this.** `{"RequestModuleInfo": 170}`
+(C8a) and `{"StatusRequest": 170}` (C8b) were both accepted with `Error: 0` and
+echoed, and no status change was logged before the next command was sent (40 s
+after C8a, about three minutes after C8b); the log does not record how long
+each watch kept polling. (The log does print a `TargetMiddleRailPosition 100 ->
+0` line under the C8a header; its timestamp, 05:34:16.528, is the C8 remote-move
+update printed late, not a C8a effect.) That run could not have seen a report-in
+anyway: hubwatch did not track the per-shade `Timestamp` then, and its
+`/notification` reader could not show events (2.5). Whether the value 170 also
+works is therefore **unverified**; send 0, as the vendor app does. kedube found
+that `RequestModuleInfo: 0` with a `PeripheralUID` also made the addressed
+shade (types 32 and 33) report in within 10 s, with no extra fields in the
+reply ("Control verbs"); not tried here.
 
 170 is 0xAA. It is the value the registration template gives every
 "do something" field (`MotorStop`, `SetMotorToTopLimit`, `MotorFineTuneToUp`,
 ...), so it looks like a generic "execute" magic number. That is an inference
-from the template, not a tested fact.
+from the template, not a tested fact. kedube's reading of the vendor app agrees
+for the motor actions and adds that report and settings fields (`StatusRequest`,
+`ReportBatteryLevel`, the limit fields) take 0 instead.
 
 ### 4.7 TaskID and Timestamp conventions
 
@@ -712,10 +969,18 @@ from the template, not a tested fact.
 ### 4.8 Pacing
 
 `/control` posts are serialised behind a lock and spaced at least
-`send_spacing_sec` apart (default 0.75 s, `DEFAULT_SEND_SPACING`). The reason
-given in `const.py` is that the previous maintainers found back-to-back
-commands unreliable. That was not re-tested today (**unverified**), but keep
-the spacing; it is cheap.
+`send_spacing_sec` apart (`DEFAULT_SEND_SPACING`). Up to 0.4.x the default was
+0.75 s, because the previous maintainers found back-to-back commands
+unreliable. 0.5.0 raises it to 1.5 s on kedube's measurements ("Control
+commands are paced"): the hub has one radio and loses commands sent faster than
+it can transmit them, while still answering `Error: 0` and storing every
+target. Thirteen commands sent 1.0-1.2 s apart still lost a few shades; 1.3 s
+lost none when sent by hand but now and then one from an automation; 1.5 s
+survived several whole-house runs, although longer use still lost the odd
+command, so kedube ships 1.6 s. A unique `Timestamp` and `TaskID` per command
+did not help. None of this was re-tested here, with five shades
+(**unverified**). On a hub with many shades, raise the option if commands get
+lost; verify-and-retry catches a lost command, but only after the verify delay.
 
 ### 4.9 Worked example: open the vanes from Home Assistant
 
@@ -775,7 +1040,7 @@ saw the `/status` change. All commands were to UID 12177.
 | C5 | 25 / 0 | none (remote, then vendor app) | | | Remote phase (per session notes, before 05:23:36): nothing. App phase: 05:23:36.5 `TargetBottom 25 -> 0`; 05:23:43.8 `TargetMiddle 0 -> 100`; 05:24:05.7 `Bottom 25 -> 0` and `Middle 0 -> 100`. |
 | C8 | 0 / 100 | none (remote; "raise and stop" per session notes, the log header says only "remote move") | | | 05:34:16.5: `Bottom 0 -> 45`, `TargetBottom 0 -> 45`, `Middle 100 -> 0`, `TargetMiddle 100 -> 0`, all in one update (the last line is printed under the C8a header). |
 | C8a | 45 / 0 | `RequestModuleInfo 170` | 05:34:28.971 (1792661668971) | `Error 0`, echoed | Nothing logged before C8b. |
-| C8b | 45 / 0 | `StatusRequest 170` | 05:35:09.686 (1792661709686) | `Error 0`, echoed | Nothing logged before "restore". |
+| C8b | 45 / 0 | `StatusRequest 170` | 05:35:09.686 (1792661709686) | `Error 0`, echoed | Nothing logged before "restore". The watcher tracked neither the per-shade `Timestamp` nor the stream, so a report-in would not have shown (4.6). |
 | restore | 45 / 0 | `BottomRailPosition 0, MiddleRailPosition 100` | 05:38:03.906 (1792661883906) | `Error 0` | 05:38:38.2 (34.3 s): `Bottom 45 -> 0` and `Middle 0 -> 100`. |
 | C1 | 0 / 50 (target 50) | `MiddleRailPosition 0` | 05:09:50.194 (1792660190194) | `Error 2`, no fields echoed | Nothing; targets unchanged. |
 | T2 | 0 / 50 (target 50) | `BottomRailPosition 0` | 05:11:04.575 (1792660264575) | `Error 0`, reply adds `MiddleRailPosition 0` | `TargetMiddle 50 -> 0` in the next snapshot; vanes still 50. |
@@ -784,6 +1049,10 @@ saw the `/status` change. All commands were to UID 12177.
 
 `BatteryVoltage`, `CalibrationState` and `SpeedInformation` were tracked
 throughout and never changed.
+
+The 2026-10-23 log adds one command, `StatusRequest 0` to 12177 at 04:37:47.098
+(1792744667098), with the shade at 0 / 0: `Error 0`, echoed; a stream event
+2.2 s later; the per-shade `Timestamp` moved; nothing moved (4.6).
 
 ---
 
@@ -797,7 +1066,10 @@ see 5.4); the actual `BottomRailPosition`
 and `MiddleRailPosition` jump straight from the old value to the new one when
 the motor stops, and when both rails move they are reported in the same
 update (C2b, "restore", C4b). With a 1 s poll interval there was not a single
-diff line showing a position between the start and end values.
+diff line showing a position between the start and end values. The
+`/notification` stream showed the same pattern in the 2026-10-23 log: one
+event when the target changed, one when the move had ended, nothing in between
+(2.5).
 
 This is why the cover entity estimates the position during a move
 (`full_travel_time_sec`, default 28 s) instead of reading it from the hub.
@@ -814,21 +1086,31 @@ poll that showed the new actual position:
 | Lower 45 -> 0 plus tilt 0 -> 100 | ~34 s | restore |
 | Stop during a raise (ended at 25) | ~35 s after the stop command | C4b |
 | Vane tilt only, shade already lowered, via vendor app | ~11 s | session notes |
+| Vane tilt 0 -> 55 only, shade already lowered, via vendor app | 21.5 s from the target-change event to the end-of-move event | 2026-10-23 log |
 | App: lower 25 -> 0, then tilt 7 s later | 29 s after the lower, 22 s after the tilt | C5 |
 | Hub reverting an impossible vane target while stationary | ~9 s | C6c |
 
 Part of each latency is motor travel and part is the hub waiting for the
-shade's RF report; the split is **unverified**. The practical rule: after a
-command, expect the `Target*` fields to reflect it on the very next poll, but
+shade's RF report; the split is **unverified**. The two tilt-only figures
+disagree (11 s and 21.5 s) for reasons that are **unverified**; only the second
+was machine-logged. The practical rule: after a command, expect the `Target*`
+fields to reflect it on the very next poll, but
 do not expect the actual positions to change for about 30 s, and do not treat
 "no change after 10 s" as failure. The integration's verify delay (default
 60 s) and motion failsafe (120 s) are consistent with this.
 
-### 5.3 Notifications never fire
+### 5.3 Notifications
 
-See section 2.5 for the evidence. Nothing in the integration depends on
-`/notification` any more; polling `/status` is the only reliable way to learn
-that a move finished.
+*Until 2026-10-23 this section was titled "Notifications never fire". That was
+wrong; 2.5 explains the mistake.*
+
+The `/notification` stream announces, within a second or two, that a shade's
+target or position changed, or that a shade reported in (2.5, 2026-10-23 log).
+It carries only the shade's id, so a client still reads `/status` to learn what
+changed, and it does not replay what happened while it was closed, so a client
+also reads `/status` after every reconnect. A push-driven client therefore
+still polls, just much less urgently. 0.5.0 does not use the stream yet and
+polls `/status` as described in 2.3; push updates are planned for 0.6.0.
 
 ### 5.4 What the hub sees of app and remote
 
@@ -851,6 +1133,12 @@ that a move finished.
   a position the hub asked for" does not fit.) Treat hub positions as possibly
   stale after any manual use, and keep polling even when the integration
   believes nothing is moving.
+- **Stale positions after a remote move** might be fixed by a per-shade
+  `StatusRequest` (4.6), which makes the shade report where it is. That has
+  not been tried on a shade the hub had lost track of (**unverified**). The
+  stream may also say more than `/status` here: in C5 the long-poll request
+  that covered the remote phase lasted 75 s instead of 60 s, which suggests the
+  hub wrote something to the stream then (2.5), but what it was was discarded.
 
 ---
 
@@ -868,14 +1156,14 @@ knows how to send to a shade, with their default or trigger values".
 | Field | Template value | What is known |
 |---|---|---|
 | `BottomRailPosition`, `TargetBottomRailPosition` | 100 | Lift position / target. Fully exercised (section 4). |
-| `MiddleRailPosition`, `TargetMiddleRailPosition` | 100 | Vane tilt / target. Fully exercised. |
+| `MiddleRailPosition`, `TargetMiddleRailPosition` | 100 | Vane tilt / target on PerfectSheer. Fully exercised. Other families: 3.1. |
 | `MotorStop` | 170 | Stops the motor. Exercised (C4b). |
-| `RequestModuleInfo` | 0 | Sent as 170: accepted, no visible effect (C8a). Purpose **unverified**. |
-| `StatusRequest` | (hub level, 0) | Sent as 170 on `/control`: accepted, no visible effect (C8b). Also appears at the top level of `/registration`. **Unverified.** |
+| `RequestModuleInfo` | 0 | Sent as 170: accepted, no visible effect seen (C8a), but the watcher could not have seen a report-in (4.6). kedube: as 0 with a `PeripheralUID`, the shade reports in. Purpose otherwise **unverified**. |
+| `StatusRequest` | (hub level, 0) | **Sent as 0 with a `PeripheralUID` on `/control`: that shade reports in** (`Error 0`, a stream event 2.2 s later, its `Timestamp` in `/status` moves, nothing moves; 2026-10-23 log, 4.6). Sent as 170 in C8b: accepted, effect unknown. **Never send it without a `PeripheralUID`**: kedube found it then sweeps the whole hub, and a hub-wide report-in closed one user's roller shades (4.6). Also appears at the top level of `/registration`. |
 | `CleanPairing` | (hub level, 0) | **Unverified.** Not sent. Top level of `/registration` only. Name suggests it erases the hub's pairings. **Never send.** |
-| `ReportBatteryLevel` | (hub level, 0) | **Unverified.** Not sent. Top level of `/registration` only. Possibly a hub-level battery refresh, a counterpart to `StatusRequest`. |
-| `Switch` | 1 | **Unverified.** Not sent. Possibly enable/disable. |
-| `Favorite` | 0 | **Unverified.** Not sent. Possibly "go to favourite position". |
+| `ReportBatteryLevel` | (hub level, 0) | Not sent. Top level of `/registration` only. kedube: the vendor app's battery report for a room (`RoomID`) or the whole hub; a `PeripheralUID` does not confine it; a hub-wide one closed type 48/1 roller shades on one hub and nine type 33 shades on another (4.6). **Never send.** |
+| `Switch` | 1 | Not sent. kedube: the vendor app's presets, `0` "Best privacy" (bottom 0, middle 100) and `1` "Best view" (100, 100), addressed by `RoomID` + `GroupID`, or the whole hub when neither is given. **It moves shades.** |
+| `Favorite` | 0 | Not sent. kedube: sends shades to their stored favourite position, addressed like `Switch`. **It moves shades.** |
 | `Calibration`, `CalibrationState` | 0, 1 | **Unverified.** Not sent. Calibration could re-learn travel limits. **Do not send.** |
 | `ConfigToScene`, `SetToScene` | 287 | **Unverified.** Not sent. Scene store/recall; 287 may be a scene id or a magic value. |
 | `CleanAllScene` | 0 | **Unverified.** Not sent. Name suggests it erases all scenes. **Do not send.** |
@@ -914,31 +1202,35 @@ try except where noted.
 3. **What does the motor do with an out-of-range target** (`250`)? Send it and
    wait a full minute without a follow-up command. Clamp in the client
    regardless.
-4. **Tilt-only latency via `/control`.** The ~11 s figure is from the vendor
-   app; confirm it with `{"BottomRailPosition": 0, "MiddleRailPosition": N}`
-   on a shade already at bottom 0.
-5. **Does `/notification` ever work?** Try a long hold (`Timeout: 300` and
-   `-1`), a `Timestamp` of 0, and omitting `ThingName`, with a client timeout
-   well above the hold so that a reply at the requested hold can be told apart
-   from the client giving up (2.5). The long-poll and its option have already
-   been removed from the integration and the README; this probe is only for
-   curiosity about the hub, not for the integration.
+4. **Tilt-only latency via `/control`.** The vendor app gave ~11 s (session
+   notes) and 21.5 s for 0 -> 55 (2026-10-23 log); confirm with
+   `{"BottomRailPosition": 0, "MiddleRailPosition": N}` on a shade already at
+   bottom 0, for a few values of N.
+5. **Does `/notification` ever work?** *Answered 2026-10-23: yes.* It is a
+   stream that never ends, and our clients read it wrongly (2.5). Follow-up
+   questions are 13 and 14.
 6. **Why are remote moves sometimes invisible** (C5) and sometimes reported
    (C8)? Repeat remote moves of different kinds (full travel vs stop mid-way,
-   tilt vs lift) with the watcher running and note which ones show up.
+   tilt vs lift) with `hubwatch.py --notify` running and `Timestamp` added to
+   `--fields`, and note which ones show up. A stream event or a new per-shade
+   `Timestamp` without a position change would mean the hub heard the shade
+   but did not take its position. Then send `StatusRequest: 0` to the shade
+   (with its `PeripheralUID`) and see whether the position catches up.
 7. **`PairingMode` 4 vs 0 and `OTA` 1 vs 0** between `/registration` and
    `/status`: does `/registration` report capabilities and `/status` current
    state, or something else?
 8. **`SpeedInformation` and `CalibrationState`.** Watch them across a full
    travel and during battery change; they never moved today.
-9. **Per-shade `Timestamp` in `/status`.** Confirm it is "last change time" by
-   comparing it with the wall clock of a known move.
+9. **Per-shade `Timestamp` in `/status`.** *Answered 2026-10-23:* it is when
+   the hub last heard from the shade, not when the record last changed
+   (section 3; 2026-10-23 log; kedube agrees).
 10. **`Segment`/`TotalSegment`.** Only testable on a hub with more shades than
     fit in one reply, if such a limit exists.
-11. **`Favorite`, `Switch`, `SetToScene`, `SmartDialSwitch`.** Probably
-    harmless, but unknown. Test on a shade whose position you do not care
-    about, with the watcher running, and never test the Limit/Clean/Reverse
-    fields on a shade you cannot afford to re-calibrate.
+11. **`SetToScene`, `SmartDialSwitch`.** Unknown. kedube has since identified
+    `Switch` and `Favorite` as the vendor app's presets, which move shades
+    (section 6); test anything on this list only on a shade whose position you
+    do not care about, with the watcher running, and never test the
+    Limit/Clean/Reverse fields on a shade you cannot afford to re-calibrate.
 12. **Stop during a vane-only move.** `stop_cover_tilt` sends the same
     `MotorStop: 170` as `stop_cover` (one motor), but a stop while the vanes
     are tilting at bottom 0 was never tried. Send `{"BottomRailPosition": 0,
@@ -948,7 +1240,30 @@ try except where noted.
     them. A lift stopped above 0 ends with the vanes closed and is reported
     about 35 s later (4.6); whether a stopped tilt keeps a partial vane
     position is unknown.
-13. **Keep collecting evidence.** The characterization log lives next to this
-    file (`docs/hub-characterization-2026-10-22.log`). When you learn
-    something new, run `tools/hubwatch.py` with its output appended to a new
-    dated log in `docs/`, and cite the entry here.
+13. **How long does a stream stay healthy on this hub?** kedube found that
+    long-lived streams can go quiet and reopens every 300 s; the 2026-10-23
+    probe lasted only 200 s. Leave `hubwatch.py --notify` running for a few
+    hours, move shades now and then, and check that every `/status` change
+    still has its event. Note when events stop, and whether reopening brings
+    them back.
+14. **`UpdateTime` objects.** kedube reports them after renames in the app
+    (2.5). Rename a shade in the app with `hubwatch.py --notify` running, and
+    record the object.
+15. **`StatusRequest` on PerfectSheer.** One try, at 0 / 0, moved nothing
+    (4.6). Repeat with the shade raised and with its vanes open, and with a
+    position the hub has lost track of (question 6), before 0.6.0 starts
+    sending it before retries. Whether `StatusRequest: 170` (C8b) does the same
+    as 0 is open; there is no reason to send 170.
+16. **Other shade families.** Everything in 3.1 outside PerfectSheer comes from
+    other projects. If you own a single-rail, two-rail, SmartDrape or shutter
+    shade, save a `/status` document with `hubwatch.py --raw`, then send
+    commands that move one rail at a time with `hubwatch.py --control`
+    (always including `BottomRailPosition`, 4.2), and check the claims in
+    3.1: that the middle rail reads 0 on single-rail shades, and on two-rail
+    shades the axis and what a bottom-only command does to the upper rail.
+
+To keep collecting evidence: the characterization logs live next to this file
+(`docs/hub-characterization-2026-10-22.log`,
+`docs/hub-characterization-2026-10-23.log`). When you learn something new, run
+`tools/hubwatch.py` with its output appended to a new dated log in `docs/`, give
+the log a header that says how it was produced, and cite the entry here.

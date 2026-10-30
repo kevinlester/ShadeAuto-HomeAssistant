@@ -5,11 +5,72 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-10-23
+
+### Added
+- Shade profiles. Each shade is driven according to the `ModuleType` /
+  `ModuleDetail` pair the hub reports for it (README, "Supported shade types";
+  `docs/HUB_PROTOCOL.md` 3.1 has the evidence per family):
+  - `sheer`, PerfectSheer 48/3 and 49/3: lift and vane tilt, unchanged from
+    0.4.0. 48/3 is verified on real shades; 49/3 is known only from the
+    vendor app.
+  - `single_rail`, every other detail of types 32, 48 and 49 (cellular 32/0
+    and 32/2, roller 48/1, roman 48/2, 49/1 and 49/2): lift only, bottom-only
+    commands as in 0.3.0; the middle rail is not sent or tracked.
+  - `two_rail`, 33/any and 32/3-5 (top-down/bottom-up, day/night): a second
+    "<shade> Top" cover for the upper rail (unique id suffix `_middle`), both
+    rails in every command (refused with an error while the other rail's
+    position is unknown, including after a stop until the hub reports where
+    the shade stopped), and a collision guard that keeps the top rail at
+    or above the bottom rail plus a gap. New options `collision_guard`
+    (default on) and `rail_min_gap` (0-50 %, default 0). Ported from upstream
+    PR #9; not yet tested on hardware by this project.
+  - `legacy`, SmartDrape 80/any, shutter 1/any, 32/48/49 without a
+    `ModuleDetail` and anything unrecognised: like `single_rail`. An
+    unrecognised pair logs one warning per setup asking for it to be
+    reported.
+- `docs/hub-characterization-2026-10-23.log`: the `/notification` stream and
+  a per-shade `StatusRequest` on real hardware.
+
 ### Changed
 - Supports Home Assistant 2025.8 and newer (0.4.0 required 2026.10). Three
   import-level shims in `compat.py` cover the API differences, CI runs the
   suite on 2025.8 as well as the latest release, and CONTRIBUTING.md
   documents when the minimum moves.
+- The `tilt_enabled` option is replaced by `tilt_mode`: `auto` shows tilt on
+  PerfectSheer shades only, `off` nowhere. Stored values are migrated
+  (on becomes `auto`, off becomes `off`).
+- The default minimum time between commands is 1.5 s (was 0.75 s), after
+  kedube/ha-norman's measurements on a 13-shade hub, where 1.0-1.2 s lost
+  commands. A value saved in the options form is kept. The form now allows
+  up to 3 s (was 1 s).
+- A stored verify delay below 30 s (possible from 0.3.x) is raised to 30 s.
+- The grace period for the hub to reflect a command and the verify delay now
+  start when the command's post is answered, not when it joins the send
+  queue. With the longer spacing, a command in a scene can wait longer than
+  the 10 s grace for its slot; it used to lose its "opening"/"closing" state
+  before it was even sent. A service call cancelled while its command is
+  queued or in flight is undone like a failed one.
+
+### Fixed
+- Shades without vanes no longer show tilt controls.
+- Two-rail shades: commands no longer set the top rail's target to 0. 0.4.0
+  sent `MiddleRailPosition: 0` with every raise, and 0.3.x sent bottom-only
+  commands, which the hub treats as middle 0.
+- Single-rail shades: a middle-rail target that an app preset left at 100
+  (the rail itself reads 0) no longer counts as a move in progress or
+  triggers a retry.
+- `tools/hubwatch.py --notify` now shows the hub's notifications. It used to
+  read each `/notification` reply to the end, which never comes, and gave up
+  at a socket timeout with nothing; it now reads the stream as it arrives,
+  prints each event, and reconnects when the stream ends or fails.
+- Documentation: 0.4.0 said the hub never delivers notifications. That was
+  wrong. `/notification` is a stream that stays open and carries an event for
+  every accepted command and every finished move; our clients could not see
+  it because they waited for the reply to end (`docs/HUB_PROTOCOL.md` 2.5,
+  with `docs/hub-characterization-2026-10-22.log` and
+  `docs/hub-characterization-2026-10-23.log`). The integration still polls;
+  push updates are planned for 0.6.0.
 
 ## [0.4.0] - 2026-10-22
 
@@ -70,8 +131,11 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Removed
 - The `/notification` long-poll watcher and the `notification_timeout_sec`
-  option; the hub never delivers notifications. Stored values of the option
-  are ignored.
+  option. Stored values of the option are ignored. The reason given at the
+  time, that the hub never delivers notifications, was wrong: the hub keeps
+  the reply open as a stream, and both this watcher and `tools/hubwatch.py`
+  waited for the reply to end and timed out, throwing away what had arrived
+  (corrected in 0.5.0; `docs/HUB_PROTOCOL.md` 2.5).
 - `Archive.zip`, an old snapshot of the source tree.
 
 ## [0.3.0] - 2025-11-17

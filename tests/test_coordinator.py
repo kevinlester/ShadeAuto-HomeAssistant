@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import timedelta
 
 from freezegun.api import FrozenDateTimeFactory
@@ -27,19 +28,33 @@ from custom_components.shadeauto.const import (
     AXIS_MIDDLE,
     DEFAULT_MOTION_POLL,
     DEFAULT_POLL,
+    MAX_SEND_SPACING,
+    MIN_VERIFY_DELAY,
     MOTION_FAILSAFE_SEC,
     PENDING_GRACE_SEC,
 )
 from custom_components.shadeauto.coordinator import ShadeAutoCoordinator
 
-from .conftest import BOTTOM, COVER, KITCHEN, MIDDLE, OFFICE, TARGET, FakeHub, make_entry, setup_integration
+from .conftest import (
+    ALL_UIDS,
+    BOTTOM,
+    COVER,
+    KITCHEN,
+    MIDDLE,
+    OFFICE,
+    TARGET,
+    FakeHub,
+    make_entry,
+    setup_integration,
+)
 
 IDLE = timedelta(seconds=DEFAULT_POLL)
 MOTION = timedelta(seconds=DEFAULT_MOTION_POLL)
 # Ticks one second past each interval, so the scheduled refresh is due whatever stagger HA added to it.
 IDLE_TICK = DEFAULT_POLL + 1
 MOTION_TICK = DEFAULT_MOTION_POLL + 1
-VERIFY_DELAY = 5
+# The shortest delay the options allow (shorter stored values are raised to it).
+VERIFY_DELAY = MIN_VERIFY_DELAY
 VERIFY_TICK = VERIFY_DELAY + 1
 VERIFY_OPTIONS = {"verify_enabled": True, "verify_delay_sec": VERIFY_DELAY}
 
@@ -261,14 +276,15 @@ async def test_a_newer_command_cancels_the_older_verify(
     await _setup(hass, VERIFY_OPTIONS)
     hub.stuck = True
 
+    half = VERIFY_DELAY / 2
     await _call(hass, SERVICE_OPEN_COVER, COVER[KITCHEN])
-    await _poll(hass, freezer, 3)
+    await _poll(hass, freezer, half)
     await _call(hass, SERVICE_SET_COVER_POSITION, COVER[KITCHEN], **{ATTR_POSITION: 20})
     assert len(hub.commands) == 2
 
-    await _poll(hass, freezer, 3)  # the first verify would have fired now; it was cancelled
+    await _poll(hass, freezer, half + 1)  # the first verify would have fired now; it was cancelled
     assert len(hub.commands) == 2
-    await _poll(hass, freezer, 3)  # the second one fires and retries the second command
+    await _poll(hass, freezer, half)  # the second one fires and retries the second command
     assert len(hub.commands) == 3
     assert hub.commands[2][BOTTOM] == 20
 
@@ -399,3 +415,104 @@ async def test_tilt_axis_is_tracked_independently(
     await _poll(hass, freezer, MOTION_TICK)
     assert not coordinator.is_moving(str(KITCHEN), AXIS_MIDDLE)
     assert hass.states.get(COVER[KITCHEN]).attributes[ATTR_CURRENT_TILT_POSITION] == 100
+
+
+async def _run_queued(hass: HomeAssistant, freezer: FrozenDateTimeFactory, seconds: int) -> None:
+    """Advance time a second at a time, letting the paced sends and the polls run.
+
+    Unlike :func:`_poll` this does not wait for every task to finish: the
+    service call is still sleeping for its next send slot.
+    """
+    for second in range(seconds + 1):
+        if second:
+            freezer.tick(timedelta(seconds=1))
+            async_fire_time_changed(hass)
+        for _ in range(20):
+            await asyncio.sleep(0)
+
+
+async def test_a_command_waiting_for_its_send_slot_keeps_its_pending_target(
+    hass: HomeAssistant, hub: FakeHub, freezer: FrozenDateTimeFactory
+) -> None:
+    """The grace for the hub to reflect a command runs from its post, not from when it joined the queue.
+
+    At the longest spacing the options allow, the last of five shades moved
+    by one call waits 12 s for its slot, longer than PENDING_GRACE_SEC, while
+    the motion polls keep running.
+    """
+    entry = await _setup(hass, {"send_spacing_sec": MAX_SEND_SPACING})
+    coordinator = _coordinator(entry)
+    await hass.services.async_call(
+        COVER_DOMAIN,
+        SERVICE_SET_COVER_POSITION,
+        {ATTR_ENTITY_ID: [COVER[uid] for uid in ALL_UIDS], ATTR_POSITION: 60},
+        blocking=False,
+    )
+    await _run_queued(hass, freezer, 0)  # all five register; the first post goes out at once
+    assert len(hub.commands) == 1
+
+    # Posts go out at 0, 3, 6, 9 and 12 s; the poll at 11 s is past the grace for all of them.
+    await _run_queued(hass, freezer, int(PENDING_GRACE_SEC) + 1)
+    assert len(hub.commands) == 4
+    assert hub.status_calls > 6  # motion polls ran while the last command waited
+    (queued,) = set(ALL_UIDS) - {cmd["PeripheralUID"] for cmd in hub.commands}
+    assert hub.target(queued) != 60
+    assert coordinator.get_target(str(queued), AXIS_BOTTOM) == 60
+    assert coordinator.is_moving(str(queued), AXIS_BOTTOM)
+    assert hass.states.get(COVER[queued]).state in (CoverState.OPENING, CoverState.CLOSING)
+
+    await _run_queued(hass, freezer, 2)
+    await hass.async_block_till_done()
+    assert len(hub.commands) == 5
+    for uid in ALL_UIDS:
+        assert hass.states.get(COVER[uid]).attributes[ATTR_CURRENT_POSITION] == 60
+    assert not coordinator.any_moving()
+
+
+async def test_the_grace_and_the_verify_delay_start_when_the_post_is_answered(
+    hass: HomeAssistant, hub: FakeHub, freezer: FrozenDateTimeFactory
+) -> None:
+    """Registered but not yet sent: neither the grace nor the verify timer runs until command_sent."""
+    entry = await _setup(hass, VERIFY_OPTIONS)
+    coordinator = _coordinator(entry)
+    uid = str(OFFICE)
+
+    cmd_id = coordinator.register_command(uid, bottom=90, middle=0)
+    await _poll(hass, freezer, VERIFY_TICK)  # longer than the grace and the verify delay
+    assert coordinator.get_target(uid, AXIS_BOTTOM) == 90  # still waiting for its slot
+    assert hub.commands == []  # no verify ran for a command that was never sent
+
+    coordinator.command_sent(uid, cmd_id - 1)  # a stale id is ignored
+    await _poll(hass, freezer, PENDING_GRACE_SEC + 1)
+    assert coordinator.get_target(uid, AXIS_BOTTOM) == 90
+
+    coordinator.command_sent(uid, cmd_id)  # (the post itself is left out: the hub never took the command)
+    await _poll(hass, freezer, PENDING_GRACE_SEC + 1)
+    assert coordinator.get_target(uid, AXIS_BOTTOM) == 35  # dropped: back to the hub's target
+    await _poll(hass, freezer, VERIFY_TICK - PENDING_GRACE_SEC - 1)
+    assert [(cmd[BOTTOM], cmd[MIDDLE]) for cmd in hub.commands] == [(90, 0)]  # the verify's one retry
+
+
+async def test_a_command_cancelled_in_flight_leaves_no_pending_target_behind(
+    hass: HomeAssistant, hub: FakeHub, integration: MockConfigEntry, freezer: FrozenDateTimeFactory
+) -> None:
+    """A stopped script cancels its service call; the cover must not show a move nobody is waiting for."""
+    coordinator = _coordinator(integration)
+    hub.control_gate = asyncio.Event()  # the hub never answers this post
+
+    call = hass.async_create_task(
+        hass.services.async_call(COVER_DOMAIN, SERVICE_OPEN_COVER, {ATTR_ENTITY_ID: COVER[OFFICE]}, blocking=True)
+    )
+    for _ in range(20):
+        await asyncio.sleep(0)
+    assert len(hub.commands) == 1
+    assert coordinator.is_moving(str(OFFICE), AXIS_BOTTOM)
+
+    call.cancel()
+    await asyncio.gather(call, return_exceptions=True)
+    hub.control_gate.set()
+    await hass.async_block_till_done()
+    assert not coordinator.is_moving(str(OFFICE), AXIS_BOTTOM)
+    assert coordinator.get_target(str(OFFICE), AXIS_BOTTOM) == 35
+    assert coordinator.update_interval == IDLE
+    assert hass.states.get(COVER[OFFICE]).state == CoverState.OPEN

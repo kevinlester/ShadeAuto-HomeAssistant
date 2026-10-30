@@ -17,23 +17,32 @@ from homeassistant.helpers.selector import (
     NumberSelector,
     NumberSelectorConfig,
     NumberSelectorMode,
+    SelectSelector,
+    SelectSelectorConfig,
+    SelectSelectorMode,
     TextSelector,
 )
 
 from .api import ShadeAutoApi, ShadeAutoError
 from .compat import vol
 from .const import (
+    CONF_COLLISION_GUARD,
     CONF_ESTIMATION_ENABLED,
     CONF_FULL_TRAVEL_TIME_SEC,
     CONF_HOST,
     CONF_LOW_BATTERY_THRESHOLD,
     CONF_MOTION_POLL_SEC,
     CONF_POLL_SECONDS,
+    CONF_RAIL_MIN_GAP,
     CONF_SEND_SPACING_SEC,
-    CONF_TILT_ENABLED,
+    CONF_TILT_MODE,
     CONF_VERIFY_DELAY_SEC,
     CONF_VERIFY_ENABLED,
     DOMAIN,
+    MAX_RAIL_MIN_GAP,
+    MAX_SEND_SPACING,
+    MIN_VERIFY_DELAY,
+    TILT_MODES,
 )
 from .options import ShadeAutoOptions
 
@@ -116,15 +125,23 @@ class ShadeAutoOptionsFlow(OptionsFlowWithReload):
             {
                 vol.Optional(CONF_POLL_SECONDS, default=current.poll_seconds): _seconds(5, 120, box=True),
                 vol.Optional(CONF_MOTION_POLL_SEC, default=current.motion_poll_sec): _seconds(1, 10, 0.5),
-                vol.Optional(CONF_TILT_ENABLED, default=current.tilt_enabled): BooleanSelector(),
+                vol.Optional(CONF_TILT_MODE, default=current.tilt_mode): SelectSelector(
+                    SelectSelectorConfig(
+                        options=list(TILT_MODES), translation_key=CONF_TILT_MODE, mode=SelectSelectorMode.DROPDOWN
+                    )
+                ),
+                vol.Optional(CONF_COLLISION_GUARD, default=current.collision_guard): BooleanSelector(),
+                vol.Optional(CONF_RAIL_MIN_GAP, default=current.rail_min_gap): NumberSelector(
+                    NumberSelectorConfig(min=0, max=MAX_RAIL_MIN_GAP, step=1, unit_of_measurement="%")
+                ),
                 vol.Optional(CONF_LOW_BATTERY_THRESHOLD, default=current.low_battery_threshold): NumberSelector(
                     NumberSelectorConfig(min=5, max=50, step=1, unit_of_measurement="%")
                 ),
-                vol.Optional(CONF_SEND_SPACING_SEC, default=current.send_spacing_sec): _seconds(0.15, 1.0, 0.05),
+                vol.Optional(CONF_SEND_SPACING_SEC, default=current.send_spacing_sec): _seconds(
+                    0.15, MAX_SEND_SPACING, 0.05
+                ),
                 vol.Optional(CONF_VERIFY_ENABLED, default=current.verify_enabled): BooleanSelector(),
-                # The hub reports end states 10-35 s after a command; verifying
-                # sooner would re-send a command the shade is still carrying out.
-                vol.Optional(CONF_VERIFY_DELAY_SEC, default=current.verify_delay_sec): _seconds(30, 120),
+                vol.Optional(CONF_VERIFY_DELAY_SEC, default=current.verify_delay_sec): _seconds(MIN_VERIFY_DELAY, 120),
                 vol.Optional(CONF_ESTIMATION_ENABLED, default=current.estimation_enabled): BooleanSelector(),
                 vol.Optional(CONF_FULL_TRAVEL_TIME_SEC, default=current.full_travel_time_sec): _seconds(5, 120),
             }

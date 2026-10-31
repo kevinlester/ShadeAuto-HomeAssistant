@@ -11,14 +11,14 @@ separately in [HUB_PROTOCOL.md](HUB_PROTOCOL.md).
  Home Assistant service call            poll timer (30 s idle / 2 s moving)
    cover.set_cover_tilt_position 50               |
             |                                     v
-            v                              ShadeAutoCoordinator
-       ShadeAutoCover ── register_command ──>  per-shade AxisState
-            |                                (actual, target, pending)
-            |  api.control(bottom=0, middle=50)     ^
-            v                                      | /status every poll
-       ShadeAutoApi ───── POST /NM/v1/control ────> hub ─── RF ──> shade motor
-            |                                      |
-            └── await coordinator.async_refresh() ─┘
+            v                              ShadeAutoCoordinator <── refresh ── notification
+       ShadeAutoCover ── register_command ──>  per-shade AxisState (debounced)   listener
+            |                                (actual, target, pending)               ^
+            |  api.control(bottom=0, middle=50)     ^                                | an event per
+            v                                      | /status (poll or event)         | change (shade
+       ShadeAutoApi ───── POST /NM/v1/control ────> hub ─── RF ──> shade motor       | ids only)
+            |                                      | └── POST /NM/v1/notification ───┘
+            └── await coordinator.async_refresh() ─┘     (held open)
                                                    |
                    entities read get_position / get_target / is_moving
 ```
@@ -35,10 +35,18 @@ separately in [HUB_PROTOCOL.md](HUB_PROTOCOL.md).
    target. If the post fails or the service call is cancelled, the cover
    throws that optimism away again at once (see
    [Failed commands](#failed-commands)).
-3. The coordinator polls `/status`, stores the hub's actual and target
-   position for every axis the shade's profile tracks, and derives *moving*
-   from them.
-4. Entities render whatever the coordinator holds. Nothing else keeps state.
+3. The coordinator reads `/status` on every poll and after every change the
+   hub announces, stores the hub's actual and target position for every axis
+   the shade's profile tracks, and derives *moving* from them.
+4. The notification listener (the push path, option `push_enabled`, on by
+   default) holds the hub's `/notification` stream open. An event says
+   *which* shades changed, never *what* changed, so all the listener does
+   with one is ask the coordinator for a refresh (and pass on the shade ids,
+   for a verify waiting for that shade to report in); a 1 s debounce turns a
+   burst of events into one `/status` read (see
+   [Push updates](#push-updates)). Polling carries on unchanged underneath,
+   so a stream that is down costs speed, never correctness.
+5. Entities render whatever the coordinator holds. Nothing else keeps state.
 
 Setup runs once before the first poll, in Home Assistant's `_async_setup`
 hook of the coordinator: `/registration` for the hub's `ThingName`, then
@@ -52,16 +60,17 @@ zero shades because of a bad reply.
 
 | Module | Responsibility | Knows about |
 |---|---|---|
-| `api.py` | HTTP client: endpoints, payload shape, pacing, reply checking, exceptions | the hub protocol only |
-| `coordinator.py` | polling, per-axis motion state, adaptive interval, verify-and-retry | `api`, `options` |
+| `api.py` | HTTP client: endpoints (including the `/notification` stream, `notification_stream()`, and the per-shade `StatusRequest`, `request_status()`), payload shape, pacing, reply checking, the rule that no report request goes out unscoped (`check_scope`), exceptions | the hub protocol only |
+| `coordinator.py` | polling, refreshes requested by the listener (through a `Debouncer` with a `REFRESH_COOLDOWN_SEC` cooldown), per-axis motion state, adaptive interval, verify-and-retry with the shade's report-in, `push_connected`, and `async_wait()`, the timer-based wait both it and the listener use | `api`, `options` |
+| `push.py` | `NotificationListener`: holds `/notification` open through `api.notification_stream()`, asks the coordinator for refreshes, tells it which shades an event named (`async_shades_reported`), recycles and reconnects the stream | `api`, `coordinator` |
 | `cover.py` | the cover entities: per-profile command mapping, tilt rules, the two-rail collision guard, slider animation | `coordinator` |
 | `sensor.py`, `binary_sensor.py` | battery entities | `coordinator`, `util.battery_percent` |
 | `entity.py` | base class: device info, availability, unique ids, naming | `coordinator` |
 | `options.py` | `ShadeAutoOptions`, the typed view of `entry.options` | `const` |
 | `config_flow.py` | add a hub, reconfigure its address, edit options | `api`, `options` |
-| `__init__.py` | wires everything into `entry.runtime_data` | all of the above |
+| `__init__.py` | wires everything into `entry.runtime_data` and starts the listener when `push_enabled` is on | all of the above |
 | `const.py` | every constant, with a comment on why it has that value, including the shade profile tables | nothing |
-| `util.py` | small pure helpers (`to_int`, `battery_percent`) | nothing |
+| `util.py` | small pure helpers (`to_int`, `battery_percent`, and `JsonStreamSplitter`, which cuts the stream's bytes into JSON objects; `tools/hubwatch.py` keeps its own copy, `StreamSplitter`, because the tool must not import the integration) | nothing |
 | `compat.py` | import-level shims for the oldest supported Home Assistant release (see CONTRIBUTING.md) | Home Assistant only |
 
 Dependencies point downwards only: entities never call the hub directly for
@@ -131,28 +140,185 @@ the coordinator keeps polling at the motion interval until the hub reports
 the stop point (target equals actual on every tracked axis) or the failsafe
 elapses.
 That is what makes the stopped position show up within a poll or two of the
-hub reporting it instead of at the next idle poll.
+hub reporting it instead of at the next idle poll. With push updates on, the
+hub's event for the stop point usually gets there first.
 
-### Why polling, and why two intervals
+### Push and polling, and why two intervals
 
 The hub reports positions only when a move has finished, never while moving.
-0.5.0 learns about that by polling `/status`: every `poll_seconds` when idle,
-every `motion_poll_sec` while any tracked axis of any shade is moving.
-`_apply_poll_interval` switches `update_interval` after every refresh; the
-refresh issued right after a command re-arms the timer at the fast interval
-immediately.
+The integration learns about changes in two ways:
 
-Up to 0.4.x this section also said that the hub's `/notification` long-poll
-never delivered an event, and 0.4.0 removed the integration's long-poll for
-that reason. That was wrong. `/notification` is a stream that the hub never
-ends; our clients read it to the end, timed out and threw away what had
-arrived (HUB_PROTOCOL.md 2.5; `docs/hub-characterization-2026-10-22.log`, C5;
-`docs/hub-characterization-2026-10-23.log`). Read incrementally, it announces
-each accepted command and each finished move within a second or two, with the
-shade ids only. Push updates on it are planned for 0.6.0: an event triggers a
-`/status` read, and polling stays as the fallback, because the stream does not
-replay what it missed while disconnected. A per-shade `StatusRequest` before a
-retry is planned for the same release.
+- **Push.** The hub writes an event to its `/notification` stream when it
+  takes a new target (from us or from the app) and again when the shade
+  reports the end of the move. Each event leads to a `/status` read within
+  about a second ([Push updates](#push-updates)).
+- **Polling.** `/status` every `poll_seconds` when idle, every
+  `motion_poll_sec` while any tracked axis of any shade is unsettled.
+  `_apply_poll_interval` switches `update_interval` after every refresh,
+  whatever caused it. The refresh issued right after a command re-arms the
+  timer at the fast interval immediately, and so does the refresh an event
+  causes when someone starts a move in the app.
+
+Polling stays, at both intervals, with push on. The stream does not replay
+what happened while it was down, a long-lived stream can go quiet without an
+error, and the option can be turned off. With the stream up, a poll rarely
+finds anything the stream has not already announced; with it down, or with
+`push_enabled` off, updates come from polling alone, as in 0.5.0. (Verify's
+report-in request is independent of the option; see
+[Verify and retry](#verify-and-retry).)
+
+Up to 0.4.x this section said that the hub's `/notification` long-poll never
+delivered an event, and 0.4.0 removed the integration's long-poll for that
+reason. That was wrong. `/notification` is a stream that the hub never ends;
+our clients read it to the end, timed out and threw away what had arrived
+(HUB_PROTOCOL.md 2.5; `docs/hub-characterization-2026-10-22.log`, C5;
+`docs/hub-characterization-2026-10-23.log`).
+
+## Push updates
+
+The listener turns the hub's `/notification` stream into coordinator
+refreshes. It runs only while `push_enabled` is on (off by default). What the
+stream looks like on the wire, and the evidence for it, is in HUB_PROTOCOL.md
+2.5.
+
+### The listener's lifecycle
+
+The listener runs as a config-entry background task for as long as the entry
+is loaded. It goes round this loop:
+
+1. **Connect.** `POST /NM/v1/notification` through
+   `ShadeAutoApi.notification_stream()`, on Home Assistant's shared aiohttp
+   session, with the body `tools/hubwatch.py` sends (`ThingName`,
+   `Timestamp`, `Timeout: 300`); kedube found the hub ignores it. Only
+   connecting is timed (`REQUEST_TIMEOUT_SEC`): a quiet stream is normal, so
+   reading is not. The reply never ends, so it is read chunk by chunk as it
+   arrives (`iter_any()`), never with `read()`, `text()` or `json()`, which
+   wait for an end that never comes (that mistake is why 0.4.0 concluded the
+   hub sent nothing). Nothing separates one JSON object from the next, so
+   `util.JsonStreamSplitter` splits the bytes with `raw_decode`: an object can
+   be cut across two chunks, and one chunk can hold several objects. More than
+   `NOTIFY_MAX_BUFFER` characters without a complete object is not what the
+   hub writes and counts as a failed stream.
+2. **Ack.** The hub writes `{"Error": "Success."}` at once. That `Error` is a
+   string, not the integer 0 of every other endpoint, so it must not go
+   through the `/control` error check, which would treat the stream as
+   failed. The first object with an `Error` key is the hub's answer:
+   `"Success."` (`NOTIFY_ACK`), or the integer 0, marks the stream as
+   acknowledged and sets `coordinator.push_connected`; any other value is a
+   refusal, which ends the stream as a failure (step 5) with the reason "the
+   hub answered Error <value>" (other values are unverified). After the
+   acknowledgement the listener asks for a refresh straight away, on every
+   (re)connect: the hub never replays events from while no stream was open,
+   so `/status` is the only way to catch up. The stream counts as *up* only
+   once it has stayed open for `NOTIFY_STABLE_SEC` (60 s) after the
+   acknowledgement; that is what resets the back-off and what the log lines
+   below refer to.
+3. **Events.** `{"Status": <hub ms>, "PeripheralList": [<uid>, ...]}` with at
+   least one id asks for a refresh ([Refresh debouncing](#refresh-debouncing))
+   and first tells the coordinator which shades it named
+   (`async_shades_reported`), which ends a verify's wait for that shade's
+   report-in ([Verify and retry](#verify-and-retry)). The hub writes one
+   when it accepts a command (the target changed), one when the shade reports
+   the end of the move (the position changed), and one when a shade reports
+   in with nothing changed. `{"UpdateTime": {...}, "Timestamp": <ms>}`, which
+   the hub sends after a rename or a schedule change in the app, is treated
+   as a plain refresh trigger in this release. Anything else (a second
+   acknowledgement, an event with an empty list, any other object) is
+   skipped with a debug line.
+4. **Recycle.** `NOTIFY_MAX_DURATION_SEC` (300 s) after a stream was opened,
+   the listener closes it and opens a new one at once, with no back-off,
+   even if it looks healthy: kedube/ha-norman saw long-lived streams go
+   quiet with no error. The new stream is a reconnect like any other, so the
+   refresh after its acknowledgement covers the moment in between. A stream
+   that was never acknowledged in those 300 s is not recycled but counts as
+   a failure (step 5).
+5. **Disconnect and back-off.** The hub never ends the stream by itself, so an
+   EOF is a disconnect, just like a connection error, a connect timeout, an
+   HTTP error status, a refusal or bytes that are not JSON. The listener
+   waits, then reconnects. The wait starts at `NOTIFY_RETRY_MIN_SEC` (5 s)
+   and doubles with each failure in a row (5, 10, 20, 40 s) up to
+   `NOTIFY_RETRY_MAX_SEC` (60 s); after a stream that was up (step 2), the
+   next failure starts from 5 s again. A stream that is acknowledged and then
+   ends before `NOTIFY_STABLE_SEC` is a failure in a row like any other, so
+   a hub that takes every stream and closes it at once (a limit of one
+   stream while another client holds it, say) costs a reconnect and a
+   `/status` read a minute at most, not every 5 s. An unexpected exception
+   while handling an object is logged as an error ("Unexpected error while
+   reading the hub's change notifications", with the traceback) and treated
+   as a failure too, so a bug cannot end push updates for good. Polling
+   covers the gap, and the refresh after the reconnect catches up.
+6. **Unload.** Unloading the entry, which includes the reload after an
+   options change, cancels the task and its timers and closes the
+   connection, and so does Home Assistant stopping (it cancels background
+   tasks before it closes the HTTP session). Nothing keeps reading the hub
+   after the entry is gone.
+
+What it logs (logger `custom_components.shadeauto.push`): one warning when a
+stream that was up (step 2) fails, "Lost the change notifications from the
+ShadeAuto hub at <host> (<reason>); polling continues, and the stream is
+reopened in the background", where the reason is the error, "the hub ended
+it" for an EOF, "the hub answered Error <value>" for a refusal, or "no
+acknowledgement in 300 s". One info line when a stream has been up again
+for `NOTIFY_STABLE_SEC` after that warning: "Change notifications from the
+ShadeAuto hub at <host> are back". So an outage logs one warning and one
+info line however often the stream flaps in between. Every attempt in
+between, every recycle and every event log at debug level only, and a
+stream that was never up since setup logs no warning (polling simply
+carries on).
+
+### Refresh debouncing
+
+Every event means "read `/status`", but events arrive in bursts: a scene
+sends one command per shade, `send_spacing_sec` apart, and each command
+produces one event when the hub accepts it and another when the shade
+reports the end of its move; one event can also list several shades. The
+listener does not read `/status` itself. It calls the coordinator's
+`async_hub_changed()`, which hands the request to the coordinator's
+`request_refresh_debouncer` (`async_schedule_call()`): a Home Assistant
+`Debouncer` with `immediate=True` and a cooldown of `REFRESH_COOLDOWN_SEC`
+(1 s). The first request reads `/status` at once; requests during the
+following second are folded into one more read at the end of it, so the
+last event is never dropped. Home Assistant's default cooldown is 10 s,
+which would hold back a "move finished" event arriving soon after another
+event by up to 10 s. Only the listener requests refreshes this way;
+commands, verify and polling call `async_refresh()` directly and are not
+debounced.
+
+The listener never waits for the read it asked for. The read runs in a task
+of its own, so closing a stream (the recycle, a reconnect, the reader
+failing) cannot cancel it; Home Assistant 2026.10 marks a coordinator
+whose refresh was cancelled as failed, which would show every cover as
+unavailable until the next read.
+
+An event that arrives while a `/status` read is in flight may describe a
+change the hub made after it answered that read. The debouncer does not
+handle that the same way on every supported release: 2025.8 drops a request
+made while its own read runs, and 2026.10 drops one whose cooldown ends
+while any refresh still runs. So the coordinator keeps track itself
+(`_change_unread`, cleared when a read starts): if an event came in while a
+read was in flight, it asks the debouncer again `REFRESH_COOLDOWN_SEC` after
+that read ends, unless a read has started since. Either way the change is
+read within a second of the read in flight ending, on both releases.
+
+A refresh caused by an event is an ordinary coordinator refresh: it updates
+every shade (`/status` always returns all of them), reconciles pending
+commands and re-applies the poll interval. So when someone starts a move in
+the app while everything is idle, the refresh sees the new target and
+switches to the motion interval at once, instead of up to `poll_seconds`
+later.
+
+### What an event does not do
+
+- It carries no positions. Positions only ever come from `/status`; an event
+  is a "look now" signal.
+- It is not replayed. Whatever happened while no stream was open is caught
+  by the refresh after the reconnect, or by the next poll.
+- It does not make remote moves visible. The hub has an event for a remote
+  move only when the shade reports the move, which it does only sometimes
+  (HUB_PROTOCOL.md 5.4).
+- `UpdateTime` does not re-read `/GetAllPeripheral` in this release, so a
+  shade renamed in the app keeps its old device name in Home Assistant until
+  the entry is reloaded.
 
 ## Shade profiles
 
@@ -375,12 +541,83 @@ two-rail shades, the bottom rail alone otherwise). If it did not, the
   remote, or the hub rewrote a vane target itself (vanes above bottom 0).
   Fighting the user would be wrong, so there is no retry;
 - otherwise (the hub never reflected our target, so the command was lost, or
-  its target is still ours and the shade did not get there) the same payload
-  (the `(bottom, middle)` pair, or `bottom` alone on single-rail and legacy
-  shades) is re-sent, once.
+  its target is still ours and the shade did not get there) the shade is
+  first asked to report in (below), and only if the same check, made again
+  after its report, still calls for it is the same payload (the
+  `(bottom, middle)` pair, or `bottom` alone on single-rail and legacy
+  shades) re-sent, once.
 
 A single-rail or legacy shade's middle axis is not tracked, so its stuck
 middle target never triggers a retry.
+
+### Asking the shade to report in before a retry
+
+A shade that is not where the hub says may simply not have told the hub yet.
+The hub learns a position only when the shade reports it, 10–35 s after a
+command on the shades seen here; kedube/ha-norman saw single-rail shades
+report a full close or open only 55–90 s after the command, and one of them,
+asked to report in 30 s after the command, answered within 4 s that it had
+already arrived. Re-sending to a shade that has already arrived wastes radio
+time, and the hub has one radio for all shades. So before a retry the
+coordinator:
+
+1. sends `{"PeripheralUID": <uid>, "StatusRequest": 0}` (plus the usual
+   `TaskID`, `Timestamp` and `ThingName`) with `api.request_status(uid)`,
+   through the same paced `/control` path as every command. The shade
+   reports in; nothing moves;
+2. waits until the change stream names that shade, or
+   `STATUS_REPORT_WAIT_SEC` (10 s) passes, whichever comes first. On our hub
+   the event came 2.2 s after the request; kedube saw a report within 5 s on
+   every try (HUB_PROTOCOL.md 4.6). The wait is registered before the
+   request is sent, so an event that beats the reply is not missed. Any
+   event naming the shade ends it, and nothing else does: the integration
+   does not watch the per-shade `Timestamp` in `/status`. So with
+   `push_enabled` off, or with the stream down, the wait always runs the full
+   10 s;
+3. refreshes and decides again by the same rules as the first check
+   (`_needs_retry`), with one exception: arrived on every axis the command
+   set, nothing is re-sent; the hub reflected our target and now shows
+   another one, nothing is re-sent; otherwise the command is re-sent, once,
+   as above. The exception: kedube reports that a report-in overwrites the
+   hub's target with the shade's position (**unverified** on our hub,
+   HUB_PROTOCOL.md 4.6). So a target that was still ours when the request
+   was sent (`targets_asked`) and now equals the position the shade just
+   reported is read as that rewrite, not as someone else's command, and the
+   command is re-sent. Without this, a shade whose transmission was lost
+   after the hub stored our target (HUB_PROTOCOL.md 4.8), the case the
+   retry exists for, would be left where it was. A target that changed to
+   anything else during the wait is still a re-command and is not fought.
+
+The request goes out whenever the first check calls for a retry, so with a
+short verify delay and a long move (a full PerfectSheer travel takes about
+60 s; the delay can be 30 s) it can reach a shade that is still travelling.
+Only a report-in from a shade at rest has been observed on our hub (nothing
+moved); what one does mid-move is open (HUB_PROTOCOL.md 7, question 15). If
+the hub then rewrites its target to an intermediate position, step 3 reads
+that as the rewrite and re-sends our command, which puts our target back;
+otherwise the shade is still short of a target that is ours, and the command
+is re-sent as 0.5.0 would have.
+
+If the `StatusRequest` itself fails (a connection error, or a reply with
+`Error != 0`), the verify logs "UID <uid>: status request failed (<error>);
+deciding on the last status" at debug level, skips the wait, and goes ahead
+with the retry the first check decided on. There is never more than one
+`StatusRequest` per verify, and none when the first check already finds the
+shade arrived or re-commanded. A newer command or a stop for the shade before
+or after any of these steps ends the verify without a retry, as it does at
+every other step, and unloading the entry cancels it with its timer.
+
+**Never hub-wide.** The request always carries the shade's `PeripheralUID`.
+Without one, the hub turns `StatusRequest` into a report-in of every shade,
+and kedube/ha-norman issue #5 saw a hub-wide report-in close a user's roller
+shades with no move command sent. The integration never sends a hub-wide
+report-in, and never sends `ReportBatteryLevel`, which a `PeripheralUID` does
+not confine to one shade (HUB_PROTOCOL.md 4.6). `request_status(uid)` is the
+API's only report request, and every `/control` post goes through
+`check_scope()`, which raises `ValueError` and sends nothing for a
+`StatusRequest` without a positive shade id or for any field in
+`NEVER_SENT_FIELDS` (`ReportBatteryLevel`). Keep it that way: any code that
+builds a `StatusRequest` must require a shade id.
 
 The delay cannot go below 30 s: the hub reports end states 10–35 s after a
 command, and a retry sent earlier would re-command a shade that is still
@@ -389,7 +626,8 @@ it (possible from 0.3.x, or from a hand-edited entry) is raised to 30 s when
 the options are read. A newer command or a stop for the shade cancels the
 pending verify, and so does unloading the entry. A retry whose `/control` post is
 overtaken by a newer command does not overwrite that command's pending state.
-The timer is an `async_call_later` callback.
+The timer is an `async_call_later` callback, and so is the 10 s limit on the
+wait for the report-in (see [Testing notes](#testing-notes) for why).
 
 ## Options
 
@@ -398,6 +636,7 @@ from `OptionsFlowWithReload`, so saving the form reloads the entry.
 
 | Option | Used by | Effect |
 |---|---|---|
+| `push_enabled` | `__init__`, listener | "Use the hub's change notifications (push updates)": push updates from the hub's `/notification` stream (`DEFAULT_PUSH_ENABLED`, off; an entry saved before 0.6.0 stays on polling until the option is turned on). Off: no listener is created, the stream is never opened and updates come from polling only, as in 0.5.0. Verify still sends its per-shade `StatusRequest` before a retry (the wait then always runs 10 s); only `verify_enabled` off stops it |
 | `poll_seconds` | coordinator | idle poll interval |
 | `motion_poll_sec` | coordinator | poll interval while anything moves |
 | `tilt_mode` | cover | `auto`: tilt features and `current_tilt_position` on `sheer` shades; `off`: no tilt anywhere. Replaces `tilt_enabled` (migrated) |
@@ -488,6 +727,57 @@ how the hub reacts, then wire the entity. Check the hub's reaction with
   `freezer.tick()` + `async_fire_time_changed()`; schedule anything time-based
   in the integration with `async_call_later`, never `asyncio.sleep`, and do
   not `await hass.async_block_till_done(wait_background_tasks=True)` while an
-  animation task is alive.
+  animation task or the notification listener is alive (the listener lives
+  as long as its stream, which never ends by itself).
+- `FakeHub` serves `/notification` as a stream, like the real hub: HTTP 200,
+  `{"Error": "Success."}` at once (unless `acknowledge_streams` is off), then
+  the reply stays open. The reply is a `StreamingResponse`, a subclass of the
+  mocker's response whose `.content` is one live aiohttp `StreamReader` that
+  `FakeHub` feeds (the stock response builds a new, already ended reader on
+  every access). The open replies are in `hub.streams`. A test writes an
+  event naming shades to every open stream with `hub.announce(uid, ...)`,
+  which sends `{"Status": <ms>, "PeripheralList": [uid, ...]}`, any object
+  with `hub.emit({...})`, or raw bytes with `hub.emit_raw(b"...")` to check
+  the framing (an object split across two writes, several objects in one).
+  `hub.drop_streams()` ends every open stream with an EOF, which is what a
+  dropped connection looks like to the listener; `hub.break_streams()` fails
+  them with a connection error, and `hub.refuse_streams` makes opening one
+  fail. Connects are counted from `hub.requests`, so a test can see the
+  reconnect, the back-off and the 300 s recycle. Like the real hub, `FakeHub`
+  writes an event naming the shade by itself when a move command is accepted,
+  when a move settles, when a stop point is reported, for `external_move()`
+  and `external_command()`, and when a shade is sent `StatusRequest: 0`
+  (which also moves its per-shade `Timestamp`; 170 does nothing). Further
+  knobs: `silent_status_requests` (the shade never reports in),
+  `reject_status_requests` (`Error 2`), `missed_reports` (the shade arrives
+  but `/status` keeps the old position until it reports in) and
+  `finish_move(uid)` (end a move now), `report_in_rewrites_target` (a
+  report-in sets the shade's targets to its positions, as kedube reports),
+  `stream_answer` (the stream's first object, to model a refusal),
+  `close_streams_after_answer` (every stream ends right after it) and
+  `status_gate` (holds each `/status` reply after it is built, for a read in
+  flight; spin the loop with `asyncio.sleep(0)` rather than `pump` while it
+  is held). A `StatusRequest` without a `PeripheralUID`, or a
+  `ReportBatteryLevel`, fails the test.
+- `FAST_OPTIONS` turns push updates off, so the tests written before 0.6.0
+  still get every refresh from a poll or a command, and `status_calls` and
+  `settle_after_polls` stay predictable; tests of the push path add
+  `PUSH_OPTIONS`. The listener is a background task, which
+  `hass.async_block_till_done()` does not wait for, so after the fake hub
+  writes something a test calls `pump(hass)`, which gives the listener a few
+  turns of the event loop and then waits for the refreshes it asked for,
+  without moving time.
+- **Why long waits use `async_call_later`.** The listener's 300 s recycle, its
+  back-off (up to 60 s) and the 10 s wait for a report-in are all
+  `async_call_later` timers (`coordinator.async_wait()`, which waits for a
+  timer or for a future, whichever completes first), not `asyncio.sleep()`
+  or `asyncio.timeout()`. Under `freezer` a sleep
+  only ends when the test advances time, and a test cannot advance time while
+  it is itself waiting for the sleeping code: a service call with
+  `blocking=True`, or `hass.async_block_till_done()`, which waits for every
+  task the integration started except background tasks. A timer callback is
+  not a task, so those calls return, and the test fires the timer when it
+  chooses with `freezer.tick()` + `async_fire_time_changed()`. It also keeps
+  the suite fast: a test jumps over 300 s instead of waiting for it.
 - Tests that move shades assert on `hub.commands` (what was sent) and on the
   entity state (what the user sees); both matter.

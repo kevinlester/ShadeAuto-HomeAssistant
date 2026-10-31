@@ -231,7 +231,13 @@ async def test_a_failed_stop_names_the_shade(hass: HomeAssistant, hub: FakeHub, 
 async def test_estimation_interpolates_the_slider_then_holds_at_the_target(
     hass: HomeAssistant, hub: FakeHub, freezer: FrozenDateTimeFactory
 ) -> None:
-    """The slider climbs while the lift is believed to be under way and waits at the target for the hub."""
+    """The slider climbs while the lift is believed to be under way, then reads as arrived until the hub says otherwise.
+
+    The shade reports its end position to the hub only some 10-35 s after it
+    stops, so once the estimated travel time has elapsed the cover is shown
+    idle at the target (as 0.3.0 did) instead of "opening" for that long. The
+    hub's report still wins when it comes.
+    """
     await _setup(hass, ESTIMATION_OPTIONS)
     hub.stuck = True  # the hub takes the target (100) but never reports the shade arriving
 
@@ -247,14 +253,14 @@ async def test_estimation_interpolates_the_slider_then_holds_at_the_target(
 
     await _poll(hass, freezer, MOTION_TICK * 2)  # past the travel time; the hub still reports 35
     state = hass.states.get(COVER[OFFICE])
-    assert state.state == CoverState.OPENING
+    assert state.state == CoverState.OPEN  # believed to have arrived; not "opening" until the hub catches up
     assert state.attributes[ATTR_CURRENT_POSITION] == 100  # held at the target, not snapped back to 35
 
-    hub.external_move(OFFICE, bottom=100)  # the hub finally reports the end state
+    hub.external_move(OFFICE, bottom=90)  # the hub finally hears from the shade: it stopped short
     await _poll(hass, freezer, MOTION_TICK)
     state = hass.states.get(COVER[OFFICE])
     assert state.state == CoverState.OPEN
-    assert state.attributes[ATTR_CURRENT_POSITION] == 100
+    assert state.attributes[ATTR_CURRENT_POSITION] == 90  # the hub's report corrects the estimate
 
 
 async def test_estimate_is_dropped_when_someone_else_re_commands_the_shade(

@@ -271,8 +271,17 @@ class ShadeAutoCover(ShadeAutoEntity, CoverEntity):
         return None if pos is None else pos == 0
 
     def _direction(self) -> int:
-        """+1 while this cover's axis heads higher, -1 while it heads lower, 0 when it is not moving."""
+        """+1 while this cover's axis heads higher, -1 while it heads lower, 0 when it is not moving.
+
+        Once the estimate's travel time has elapsed the cover reads as idle at
+        the estimated target, even though the hub has not yet heard from the
+        shade (that takes it 10-35 s, longer on some shades). The hub's report
+        still wins when it comes: the slider corrects to the reported position.
+        """
         if not self.coordinator.is_moving(self._uid, self._axis):
+            return 0
+        estimate = self._valid_estimate()
+        if estimate is not None and estimate.finished(time.monotonic()):
             return 0
         target = self.coordinator.get_target(self._uid, self._axis)
         actual = self.coordinator.get_position(self._uid, self._axis)

@@ -33,6 +33,7 @@ from .const import (
     CONF_LOW_BATTERY_THRESHOLD,
     CONF_MOTION_POLL_SEC,
     CONF_POLL_SECONDS,
+    CONF_PUSH_ENABLED,
     CONF_RAIL_MIN_GAP,
     CONF_SEND_SPACING_SEC,
     CONF_TILT_MODE,
@@ -125,6 +126,7 @@ class ShadeAutoOptionsFlow(OptionsFlowWithReload):
             {
                 vol.Optional(CONF_POLL_SECONDS, default=current.poll_seconds): _seconds(5, 120, box=True),
                 vol.Optional(CONF_MOTION_POLL_SEC, default=current.motion_poll_sec): _seconds(1, 10, 0.5),
+                vol.Optional(CONF_PUSH_ENABLED, default=current.push_enabled): BooleanSelector(),
                 vol.Optional(CONF_TILT_MODE, default=current.tilt_mode): SelectSelector(
                     SelectSelectorConfig(
                         options=list(TILT_MODES), translation_key=CONF_TILT_MODE, mode=SelectSelectorMode.DROPDOWN

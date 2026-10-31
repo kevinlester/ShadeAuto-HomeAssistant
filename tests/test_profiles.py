@@ -42,6 +42,7 @@ from custom_components.shadeauto.const import (
     PROFILE_SHEER,
     PROFILE_SINGLE_RAIL,
     PROFILE_TWO_RAIL,
+    STATUS_REPORT_WAIT_SEC,
 )
 from custom_components.shadeauto.coordinator import ShadeAutoCoordinator, shade_profile
 from custom_components.shadeauto.cover import plan_rail_move
@@ -55,10 +56,12 @@ from .conftest import (
     MOTOR_STOP,
     SHEER,
     SINGLE_RAIL,
+    STATUS_REQUEST,
     TARGET,
     TWO_RAIL,
     FakeHub,
     hub_family,
+    is_status_request,
     make_entry,
     setup_integration,
 )
@@ -71,6 +74,7 @@ MOTION = timedelta(seconds=DEFAULT_MOTION_POLL)
 MOTION_TICK = DEFAULT_MOTION_POLL + 1
 VERIFY_OPTIONS = {"verify_enabled": True, "verify_delay_sec": MIN_VERIFY_DELAY}
 VERIFY_TICK = MIN_VERIFY_DELAY + 1
+REPORT_TICK = STATUS_REPORT_WAIT_SEC + 1  # verify's wait for the shade to report in, which runs out without the stream
 
 # Synthetic shades. Den is a roller whose middle target an app preset left at 100.
 DEN = 40001
@@ -264,11 +268,13 @@ async def test_single_rail_retry_is_bottom_only_too(
     await _call(hass, SERVICE_CLOSE_COVER, DEN_COVER)
     assert hass.states.get(DEN_COVER).state == CoverState.CLOSING
     await _poll(hass, freezer, VERIFY_TICK)
+    await _poll(hass, freezer, REPORT_TICK)
 
     commands = _commands_for(hub, DEN)
-    assert len(commands) == 2
-    assert commands[1][BOTTOM] == 0
-    assert MIDDLE not in commands[1]
+    assert [is_status_request(cmd) for cmd in commands] == [False, True, False]
+    assert commands[1][STATUS_REQUEST] == 0
+    assert commands[2][BOTTOM] == 0
+    assert MIDDLE not in commands[2]
 
 
 async def test_unrecognised_module_pair_is_warned_about_once(
@@ -587,7 +593,9 @@ async def test_two_rail_verify_retries_both_rails_once(
     await _call(hass, SERVICE_SET_COVER_POSITION, PATIO_TOP, **{ATTR_POSITION: 90})
     await _poll(hass, freezer, VERIFY_TICK)
     await _poll(hass, freezer, VERIFY_TICK)
-    assert [_rails(cmd) for cmd in _commands_for(hub, PATIO)] == [(20, 90), (20, 90)]
+    commands = _commands_for(hub, PATIO)
+    assert [is_status_request(cmd) for cmd in commands] == [False, True, False]
+    assert [_rails(cmd) for cmd in commands if not is_status_request(cmd)] == [(20, 90), (20, 90)]
 
 
 async def _until(condition: Callable[[], bool]) -> None:

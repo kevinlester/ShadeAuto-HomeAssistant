@@ -13,7 +13,30 @@ CONF_HOST = "host"
 
 # --- Hub transport -----------------------------------------------------------
 DEFAULT_PORT = 10123  # the hub's local HTTP API; fixed by its firmware
-REQUEST_TIMEOUT_SEC = 10.0  # total timeout for one request/response
+REQUEST_TIMEOUT_SEC = 10.0  # total timeout for one request/response; bounds only connecting for /notification
+# The /notification stream (docs/HUB_PROTOCOL.md 2.5). kedube/ha-norman saw
+# long-lived streams go quiet, so it closes and reopens its stream every 300 s
+# even when nothing is wrong; so do we.
+NOTIFY_MAX_DURATION_SEC = 300.0
+# Back-off before reopening a stream that ended or failed: starts here, doubles
+# after every attempt until a stream has stayed up for NOTIFY_STABLE_SEC again,
+# and never exceeds the cap.
+NOTIFY_RETRY_MIN_SEC = 5.0
+NOTIFY_RETRY_MAX_SEC = 60.0
+# A stream counts as working again only once it has stayed open this long after
+# the hub's acknowledgement. One that is acknowledged and then ends at once (a
+# hub that allows one stream while another client holds it, say) is a failure
+# like any other, so the back-off keeps growing and the outage gets one warning,
+# not a warning and an info line every few seconds.
+NOTIFY_STABLE_SEC = NOTIFY_RETRY_MAX_SEC
+# The acknowledgement the hub writes first: {"Error": "Success."}, a string
+# unlike every other endpoint's Error (docs/HUB_PROTOCOL.md 2.5). The integer 0
+# of the other endpoints is taken as success too; any other value means the
+# hub refused the stream.
+NOTIFY_ACK = "Success."
+# The hub's objects are a few dozen bytes; this much text without a complete
+# JSON object means the stream is not what the hub writes, so it is reopened.
+NOTIFY_MAX_BUFFER = 65536
 
 # --- Option keys (entry.options) ---------------------------------------------
 CONF_POLL_SECONDS = "poll_seconds"
@@ -27,6 +50,7 @@ CONF_FULL_TRAVEL_TIME_SEC = "full_travel_time_sec"
 CONF_TILT_MODE = "tilt_mode"
 CONF_COLLISION_GUARD = "collision_guard"
 CONF_RAIL_MIN_GAP = "rail_min_gap"
+CONF_PUSH_ENABLED = "push_enabled"
 # 0.4.x stored a bool here; it is only read to migrate to CONF_TILT_MODE.
 CONF_TILT_ENABLED = "tilt_enabled"
 
@@ -70,6 +94,12 @@ DEFAULT_TILT_MODE = TILT_MODE_AUTO
 DEFAULT_COLLISION_GUARD = True
 DEFAULT_RAIL_MIN_GAP = 0  # percent; PR #9's default
 MAX_RAIL_MIN_GAP = 50  # PR #9's form range
+# Read the hub's /notification stream and refresh as soon as it announces a
+# change. Off means no stream at all: updates come from polling only, as in
+# 0.5.0 (verify still asks the one shade to report in before a retry; see
+# STATUS_REPORT_WAIT_SEC). Polling runs either way, because the stream does
+# not replay what it missed while down.
+DEFAULT_PUSH_ENABLED = False  # opt-in until the stream has more hours on real hubs
 
 # --- Hub field names ---------------------------------------------------------
 ATTR_PERIPHERAL_UID = "PeripheralUID"
@@ -81,6 +111,19 @@ ATTR_BATTERY = "BatteryVoltage"  # despite the name, the hub reports a percentag
 ATTR_MOTOR_STOP = "MotorStop"
 ATTR_ERROR = "Error"
 MOTOR_STOP = 170  # the hub's "execute" value for action fields such as MotorStop
+# With a PeripheralUID, makes that one shade report in without moving
+# (docs/HUB_PROTOCOL.md 4.6). 0 is the vendor app's value; 170 does nothing.
+ATTR_STATUS_REQUEST = "StatusRequest"
+STATUS_REQUEST = 0
+# Never sent: a PeripheralUID does not confine ReportBatteryLevel to one shade,
+# and hub-wide it closed shades on two users' hubs (kedube/ha-norman issue #5;
+# docs/HUB_PROTOCOL.md 4.6).
+NEVER_SENT_FIELDS = frozenset({"ReportBatteryLevel"})
+# /notification objects: {"Status": <hub ms>, "PeripheralList": [<uid>, ...]}
+# per change, and {"UpdateTime": {...}, "Timestamp": <ms>} after a rename or
+# schedule change in the app (kedube).
+ATTR_PERIPHERAL_LIST = "PeripheralList"
+ATTR_UPDATE_TIME = "UpdateTime"
 
 # --- Axes ---------------------------------------------------------------------
 # The hub knows two commanded axes per shade: the bottom rail (lift) and the
@@ -153,3 +196,13 @@ PROFILE_AXES: dict[str, tuple[str, ...]] = {
 POSITION_TOLERANCE = 2  # a hub position this close to the target counts as "arrived"
 PENDING_GRACE_SEC = 10.0  # how long a just-sent command counts as moving before the hub must reflect its target
 MOTION_FAILSAFE_SEC = 120.0  # a shade whose target != actual for this long with no change is treated as stalled
+# Cooldown of the coordinator's refresh requests (the stream's events). Home
+# Assistant's default is 10 s, which would hold back a "move finished" event
+# that arrives soon after another one (a shade's two events, or two shades in
+# a scene) by up to 10 s; 1 s still folds a burst into one /status read.
+REFRESH_COOLDOWN_SEC = 1.0
+# How long verify waits for a shade to report in after its StatusRequest
+# before deciding on what /status says anyway. Our hub announced the report
+# 2.3 s after the request (docs/hub-characterization-2026-10-23.log), kedube's
+# within 5 s on every try; without the stream the wait always runs out.
+STATUS_REPORT_WAIT_SEC = 10.0

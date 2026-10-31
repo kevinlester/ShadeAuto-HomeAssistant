@@ -5,13 +5,15 @@ no authentication. The hub identifies itself with a ``ThingName`` in the
 registration response, which later calls echo back. Positions are 0-100:
 ``BottomRailPosition`` 0 = fully lowered, 100 = fully raised;
 ``MiddleRailPosition`` is the vane tilt on sheer shades, 0 = closed,
-100 = open. See ``docs/HUB_PROTOCOL.md`` for the observed behaviour.
+100 = open. ``/notification`` is different: a stream the hub never ends,
+read with :meth:`ShadeAutoApi.notification_stream`. See
+``docs/HUB_PROTOCOL.md`` for the observed behaviour.
 """
 
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Iterator
+from collections.abc import AsyncGenerator, Iterator, Mapping
 import logging
 import time
 from typing import Any
@@ -25,14 +27,25 @@ from .const import (
     ATTR_MIDDLE_RAIL,
     ATTR_MOTOR_STOP,
     ATTR_PERIPHERAL_UID,
+    ATTR_STATUS_REQUEST,
     DEFAULT_PORT,
     DEFAULT_SEND_SPACING,
     MOTOR_STOP,
+    NEVER_SENT_FIELDS,
+    NOTIFY_MAX_BUFFER,
     REQUEST_TIMEOUT_SEC,
+    STATUS_REQUEST,
 )
-from .util import to_int
+from .util import JsonStreamSplitter, to_int
 
 _LOGGER = logging.getLogger(__name__)
+
+# The /notification stream is legitimately silent for as long as nothing
+# changes, so only connecting is timed; the caller decides when to give up on
+# a stream (it reopens it every NOTIFY_MAX_DURATION_SEC).
+STREAM_TIMEOUT = ClientTimeout(
+    total=None, connect=REQUEST_TIMEOUT_SEC, sock_connect=REQUEST_TIMEOUT_SEC, sock_read=None
+)
 
 
 class ShadeAutoError(Exception):
@@ -77,6 +90,22 @@ def clamp_position(value: int) -> int:
     clamp before sending.
     """
     return max(0, min(100, int(value)))
+
+
+def check_scope(uid: int | str | None, fields: Mapping[str, Any]) -> None:
+    """Refuse a ``/control`` payload that could reach shades other than ``uid``.
+
+    Without a ``PeripheralUID`` the hub turns ``StatusRequest`` into a
+    hub-wide report-in, and a hub-wide report-in closed one user's roller
+    shades (kedube/ha-norman issue #5); ``ReportBatteryLevel`` is not confined
+    by a ``PeripheralUID`` at all (docs/HUB_PROTOCOL.md 4.6). So a
+    ``StatusRequest`` needs a real shade id, and the fields in
+    ``NEVER_SENT_FIELDS`` are never sent. Raises ``ValueError``.
+    """
+    if never := NEVER_SENT_FIELDS & fields.keys():
+        raise ValueError(f"refusing to send {sorted(never)}: the hub does not confine it to one shade")
+    if ATTR_STATUS_REQUEST in fields and not (str(uid).isdigit() and int(str(uid)) > 0):
+        raise ValueError(f"refusing to send StatusRequest for {uid!r}: without a shade id it reaches every shade")
 
 
 def find_dicts_with_key(obj: Any, key: str) -> Iterator[dict[str, Any]]:
@@ -177,6 +206,40 @@ class ShadeAutoApi:
             _LOGGER.debug("status positions (uid:bottom/middle): %s", summary)
         return items
 
+    async def notification_stream(self) -> AsyncGenerator[Any]:
+        """Yield every JSON object the hub writes on ``/notification``, as it arrives.
+
+        The hub answers at once with ``{"Error": "Success."}`` (a string,
+        unlike every other endpoint's ``Error``), keeps the response open and
+        then writes ``{"Status": <hub ms>, "PeripheralList": [<uid>, ...]}``
+        whenever a shade's target or position changes or a shade reports in,
+        with nothing between one object and the next (docs/HUB_PROTOCOL.md
+        2.5). The iterator ends when the hub closes the stream; a connection
+        that cannot be opened or breaks raises
+        :class:`ShadeAutoConnectionError`. Only connecting is timed
+        (``STREAM_TIMEOUT``): a quiet stream is normal. Close the iterator
+        (``contextlib.aclosing``) to drop the connection.
+        """
+        url = f"{self._base}/notification"
+        # kedube found that the hub ignores the body; this is the one our hub
+        # was probed with (docs/hub-characterization-2026-10-23.log).
+        payload: dict[str, Any] = {"Timestamp": _now_ts(), "Timeout": 300}
+        if self.thing_name:
+            payload["ThingName"] = self.thing_name
+        _LOGGER.debug("POST %s %s (stream)", url, payload)
+        splitter = JsonStreamSplitter(NOTIFY_MAX_BUFFER)
+        try:
+            async with self._session.post(url, json=payload, timeout=STREAM_TIMEOUT) as resp:
+                resp.raise_for_status()
+                async for chunk in resp.content.iter_any():
+                    for item in splitter.feed(chunk):
+                        yield item
+        except (aiohttp.ClientError, TimeoutError, ValueError) as err:
+            # ValueError: the splitter found no JSON in what the hub sent.
+            raise ShadeAutoConnectionError(f"notification: {err}") from err
+        if splitter.pending:
+            _LOGGER.debug("notification stream ended inside an object: %r", splitter.pending[:200])
+
     # --- commands -------------------------------------------------------------
 
     def _next_task_id(self) -> int:
@@ -211,7 +274,28 @@ class ShadeAutoApi:
         """Stop a moving shade. The hub then re-targets the shade to wherever it stopped."""
         return await self._send_control(uid, {ATTR_MOTOR_STOP: MOTOR_STOP})
 
+    async def request_status(self, uid: int | str) -> dict[str, Any]:
+        """Ask one shade to report in (``StatusRequest: 0``) and return the hub's reply.
+
+        The shade tells the hub where it really is, without moving; the hub
+        announces that on the ``/notification`` stream (2.3 s after the
+        request on our hub, within 5 s in kedube/ha-norman's tests) and
+        ``/status`` shows the shade's new per-shade ``Timestamp`` and any
+        position it had missed. It is a radio transmission like any command,
+        so it is paced with them.
+
+        This is the only report request the client can send, and only for
+        one shade: without a ``PeripheralUID`` the hub turns ``StatusRequest``
+        into a hub-wide report-in, and a hub-wide report-in closed one user's
+        roller shades (kedube/ha-norman issue #5; docs/HUB_PROTOCOL.md 4.6).
+        ``ReportBatteryLevel`` is never sent, because a ``PeripheralUID`` does
+        not confine it. Anything but a positive shade id raises ``ValueError``
+        and sends nothing (:func:`check_scope`).
+        """
+        return await self._send_control(uid, {ATTR_STATUS_REQUEST: STATUS_REQUEST})
+
     async def _send_control(self, uid: int | str, fields: dict[str, Any]) -> dict[str, Any]:
+        check_scope(uid, fields)
         async with self._cmd_lock:
             # Sleeps the remaining gap, re-checked because a timer may fire a
             # hair early; not a busy wait.

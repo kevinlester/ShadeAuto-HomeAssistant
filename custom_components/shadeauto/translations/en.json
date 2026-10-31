@@ -30,6 +30,7 @@
         "data": {
           "poll_seconds": "Poll interval while idle (seconds)",
           "motion_poll_sec": "Poll interval while a shade is moving (seconds)",
+          "push_enabled": "Use the hub's change notifications (push updates)",
           "tilt_mode": "Vane tilt",
           "collision_guard": "Two-rail shades: keep the top rail at or above the bottom rail",
           "rail_min_gap": "Two-rail shades: minimum gap between the rails (%)",
@@ -41,6 +42,7 @@
           "full_travel_time_sec": "Time for a full open or close (seconds)"
         },
         "data_description": {
+          "push_enabled": "Reads a shade as soon as the hub announces that it changed, instead of at the next poll. Polling continues either way.",
           "tilt_mode": "Automatic exposes tilt on shades with vanes (PerfectSheer) only. Off hides it everywhere; the vanes keep their setting either way.",
           "collision_guard": "When a move would cross the rails, the other rail moves out of the way. Applies to top-down/bottom-up and day/night shades only.",
           "send_spacing_sec": "The hub drops commands sent too close together while still reporting success."

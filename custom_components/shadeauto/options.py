@@ -14,6 +14,7 @@ from .const import (
     CONF_LOW_BATTERY_THRESHOLD,
     CONF_MOTION_POLL_SEC,
     CONF_POLL_SECONDS,
+    CONF_PUSH_ENABLED,
     CONF_RAIL_MIN_GAP,
     CONF_SEND_SPACING_SEC,
     CONF_TILT_ENABLED,
@@ -26,6 +27,7 @@ from .const import (
     DEFAULT_LOW_BATT,
     DEFAULT_MOTION_POLL,
     DEFAULT_POLL,
+    DEFAULT_PUSH_ENABLED,
     DEFAULT_RAIL_MIN_GAP,
     DEFAULT_SEND_SPACING,
     DEFAULT_TILT_MODE,
@@ -97,6 +99,7 @@ class ShadeAutoOptions:
     tilt_mode: str = DEFAULT_TILT_MODE
     collision_guard: bool = DEFAULT_COLLISION_GUARD
     rail_min_gap: int = DEFAULT_RAIL_MIN_GAP
+    push_enabled: bool = DEFAULT_PUSH_ENABLED
 
     @classmethod
     def from_mapping(cls, options: Mapping[str, Any]) -> ShadeAutoOptions:
@@ -114,4 +117,5 @@ class ShadeAutoOptions:
             tilt_mode=_tilt_mode(options),
             collision_guard=_read(options, CONF_COLLISION_GUARD, DEFAULT_COLLISION_GUARD, bool),
             rail_min_gap=max(0, min(MAX_RAIL_MIN_GAP, _read(options, CONF_RAIL_MIN_GAP, DEFAULT_RAIL_MIN_GAP, int))),
+            push_enabled=_read(options, CONF_PUSH_ENABLED, DEFAULT_PUSH_ENABLED, bool),
         )

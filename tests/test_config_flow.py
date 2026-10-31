@@ -14,7 +14,7 @@ from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.shadeauto.const import DOMAIN
 
-from .conftest import ALL_UIDS, COVER, HOST, KITCHEN, FakeHub, make_entry, setup_integration
+from .conftest import ALL_UIDS, COVER, FAST_OPTIONS, HOST, KITCHEN, FakeHub, make_entry, setup_integration
 
 NEW_HOST = "192.168.3.250"
 
@@ -132,6 +132,7 @@ async def test_options_flow_reloads_entry_with_new_values(
         {
             "poll_seconds": 10,
             "motion_poll_sec": 1.5,
+            "push_enabled": True,
             "tilt_mode": "off",
             "collision_guard": False,
             "rail_min_gap": 10,
@@ -150,6 +151,8 @@ async def test_options_flow_reloads_entry_with_new_values(
     coordinator = integration.runtime_data.coordinator
     assert coordinator.options.poll_seconds == 10
     assert coordinator.options.motion_poll_sec == 1.5
+    assert coordinator.options.push_enabled is True  # the test entries start with it off
+    assert integration.runtime_data.listener is not None
     assert coordinator.options.tilt_mode == "off"
     assert coordinator.options.collision_guard is False
     assert coordinator.options.rail_min_gap == 10
@@ -209,3 +212,24 @@ async def test_options_form_can_be_saved_with_a_verify_delay_stored_below_its_mi
     assert result["type"] is FlowResultType.CREATE_ENTRY
     assert entry.options["verify_delay_sec"] == 30
     assert entry.runtime_data.coordinator.options.verify_delay_sec == 30
+
+
+async def test_options_form_offers_push_updates_off_for_an_entry_saved_before_they_existed(
+    hass: HomeAssistant, hub: FakeHub
+) -> None:
+    """Push updates are opt-in: an older entry stays on polling until the option is turned on."""
+    options = {key: value for key, value in {**FAST_OPTIONS, **IN_RANGE_SPACING}.items() if key != "push_enabled"}
+    entry = MockConfigEntry(domain=DOMAIN, unique_id=f"shadeauto_{HOST}", data={"host": HOST}, options=options)
+    entry.add_to_hass(hass)
+    await setup_integration(hass, entry)
+    assert entry.runtime_data.listener is None
+
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+    assert _form_defaults(result)["push_enabled"] is False
+
+    result = await hass.config_entries.options.async_configure(result["flow_id"], {"push_enabled": True})
+    await hass.async_block_till_done()
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    assert entry.options["push_enabled"] is True
+    assert entry.runtime_data.listener is not None
+    assert entry.runtime_data.coordinator.push_connected  # the reload opened the stream

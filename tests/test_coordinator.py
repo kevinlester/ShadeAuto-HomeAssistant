@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import timedelta
+import logging
 
 from freezegun.api import FrozenDateTimeFactory
 from homeassistant.components.cover import (
@@ -32,6 +33,7 @@ from custom_components.shadeauto.const import (
     MIN_VERIFY_DELAY,
     MOTION_FAILSAFE_SEC,
     PENDING_GRACE_SEC,
+    STATUS_REPORT_WAIT_SEC,
 )
 from custom_components.shadeauto.coordinator import ShadeAutoCoordinator
 
@@ -42,9 +44,13 @@ from .conftest import (
     KITCHEN,
     MIDDLE,
     OFFICE,
+    PUSH_OPTIONS,
+    STATUS_REQUEST,
     TARGET,
     FakeHub,
+    is_status_request,
     make_entry,
+    pump,
     setup_integration,
 )
 
@@ -57,6 +63,9 @@ MOTION_TICK = DEFAULT_MOTION_POLL + 1
 VERIFY_DELAY = MIN_VERIFY_DELAY
 VERIFY_TICK = VERIFY_DELAY + 1
 VERIFY_OPTIONS = {"verify_enabled": True, "verify_delay_sec": VERIFY_DELAY}
+# Before retrying, verify asks the shade to report in and waits for it; without
+# the stream (these tests) the wait always runs its full length.
+REPORT_TICK = STATUS_REPORT_WAIT_SEC + 1
 
 
 async def _poll(hass: HomeAssistant, freezer: FrozenDateTimeFactory, seconds: float) -> None:
@@ -193,14 +202,18 @@ async def test_verify_retries_exactly_once_when_the_shade_does_not_arrive(
     await _call(hass, SERVICE_OPEN_COVER, COVER[KITCHEN])
     assert len(hub.commands) == 1
 
-    await _poll(hass, freezer, VERIFY_TICK)  # verify fires: not at target, hub targets are still ours -> retry
+    await _poll(hass, freezer, VERIFY_TICK)  # verify fires: not at target, hub targets are still ours ...
     assert len(hub.commands) == 2
-    assert hub.commands[1][BOTTOM] == 100
-    assert hub.commands[1][MIDDLE] == 0
+    assert hub.commands[1]["PeripheralUID"] == KITCHEN  # ... so it asks this shade to report in
+    assert hub.commands[1][STATUS_REQUEST] == 0
+    await _poll(hass, freezer, REPORT_TICK)  # the report still has it at 0 -> retry
+    assert len(hub.commands) == 3
+    assert hub.commands[2][BOTTOM] == 100
+    assert hub.commands[2][MIDDLE] == 0
 
-    await _poll(hass, freezer, VERIFY_TICK)  # no second retry
+    await _poll(hass, freezer, VERIFY_TICK)  # no second retry, and no second status request
     await _poll(hass, freezer, VERIFY_TICK)
-    assert len(hub.commands) == 2
+    assert len(hub.commands) == 3
 
 
 async def test_verify_retries_once_when_the_hub_never_took_the_command(
@@ -215,13 +228,14 @@ async def test_verify_retries_once_when_the_hub_never_took_the_command(
     assert hub.target(KITCHEN, MIDDLE) == 50
 
     await _poll(hass, freezer, VERIFY_TICK)
-    assert len(hub.commands) == 2
-    assert hub.commands[1][BOTTOM] == 100
-    assert hub.commands[1][MIDDLE] == 0
+    await _poll(hass, freezer, REPORT_TICK)
+    assert [is_status_request(cmd) for cmd in hub.commands] == [False, True, False]
+    assert hub.commands[2][BOTTOM] == 100
+    assert hub.commands[2][MIDDLE] == 0
 
     await _poll(hass, freezer, VERIFY_TICK)
     await _poll(hass, freezer, VERIFY_TICK)
-    assert len(hub.commands) == 2
+    assert len(hub.commands) == 3
 
 
 async def test_verify_does_not_fight_a_lift_command_from_someone_else(
@@ -284,9 +298,238 @@ async def test_a_newer_command_cancels_the_older_verify(
 
     await _poll(hass, freezer, half + 1)  # the first verify would have fired now; it was cancelled
     assert len(hub.commands) == 2
-    await _poll(hass, freezer, half)  # the second one fires and retries the second command
+    await _poll(hass, freezer, half)  # the second one fires, asks the shade, and retries the second command
+    await _poll(hass, freezer, REPORT_TICK)
+    assert [is_status_request(cmd) for cmd in hub.commands] == [False, False, True, False]
+    assert hub.commands[3][BOTTOM] == 20
+
+
+# --- verify asks the shade before it retries ----------------------------------------
+
+
+@pytest.mark.parametrize("push", [False, True])
+async def test_verify_skips_the_retry_when_the_shades_report_shows_it_arrived(
+    hass: HomeAssistant, hub: FakeHub, freezer: FrozenDateTimeFactory, push: bool
+) -> None:
+    """The hub missed the end of the move; asked, the shade reports that it got there, so nothing is re-sent."""
+    await _setup(hass, {**VERIFY_OPTIONS, "push_enabled": push})
+    hub.missed_reports = True
+
+    await _call(hass, SERVICE_OPEN_COVER, COVER[KITCHEN])
+    assert hass.states.get(COVER[KITCHEN]).state == CoverState.OPENING  # the hub still says 0
+
+    await _poll(hass, freezer, VERIFY_TICK)
+    await pump(hass)
+    (status_request,) = (cmd for cmd in hub.commands if is_status_request(cmd))
+    assert status_request["PeripheralUID"] == KITCHEN
+    assert status_request[STATUS_REQUEST] == 0
+    if not push:
+        # Nothing says the shade has reported, so the wait runs its course.
+        assert hass.states.get(COVER[KITCHEN]).state == CoverState.OPENING
+        await _poll(hass, freezer, REPORT_TICK)
+    state = hass.states.get(COVER[KITCHEN])
+    assert state.state == CoverState.OPEN
+    assert state.attributes[ATTR_CURRENT_POSITION] == 100
+    assert len(hub.commands) == 2  # the command and one status request; no retry
+
+    await _poll(hass, freezer, VERIFY_TICK)
+    assert len(hub.commands) == 2
+
+
+@pytest.mark.parametrize("push", [False, True])
+async def test_verify_still_retries_when_the_report_in_rewrites_the_hubs_target(
+    hass: HomeAssistant, hub: FakeHub, freezer: FrozenDateTimeFactory, push: bool
+) -> None:
+    """The hub stored our target but the shade never moved (a lost transmission, docs/HUB_PROTOCOL.md 4.8).
+
+    kedube reports that a report-in sets the hub's target to the shade's
+    position. That is not someone else re-commanding the shade, so the one
+    retry still goes out, as it did in 0.5.0.
+    """
+    await _setup(hass, {**VERIFY_OPTIONS, "push_enabled": push})
+    hub.stuck = True
+    hub.report_in_rewrites_target = True
+
+    await _call(hass, SERVICE_OPEN_COVER, COVER[KITCHEN])
+    assert (hub.target(KITCHEN), hub.target(KITCHEN, MIDDLE)) == (100, 0)  # reflected
+    await _poll(hass, freezer, VERIFY_TICK)
+    await pump(hass)
+    await _poll(hass, freezer, REPORT_TICK)
+    assert [(cmd.get(BOTTOM), cmd.get(MIDDLE), cmd.get(STATUS_REQUEST)) for cmd in hub.commands] == [
+        (100, 0, None),
+        (None, None, 0),
+        (100, 0, None),
+    ]
+    assert hub.target(KITCHEN) == 100  # the retry put our target back
+
+    await _poll(hass, freezer, VERIFY_TICK)
+    await _poll(hass, freezer, REPORT_TICK)
     assert len(hub.commands) == 3
-    assert hub.commands[2][BOTTOM] == 20
+
+
+async def test_verify_does_not_fight_a_command_from_someone_else_during_the_report_wait(
+    hass: HomeAssistant, hub: FakeHub, freezer: FrozenDateTimeFactory
+) -> None:
+    """A target that changed to neither ours nor the shade's position is a re-command, whatever the report did."""
+    await _setup(hass, VERIFY_OPTIONS)
+    hub.stuck = True
+    hub.report_in_rewrites_target = True
+
+    await _call(hass, SERVICE_OPEN_COVER, COVER[KITCHEN])
+    await _poll(hass, freezer, VERIFY_TICK)
+    assert is_status_request(hub.commands[-1])
+    hub.external_command(KITCHEN, bottom=50, middle=0)  # the vendor app, while verify waits
+    await _poll(hass, freezer, REPORT_TICK)
+    assert len(hub.commands) == 2
+    assert hub.target(KITCHEN) == 50
+
+
+async def test_verify_reads_the_shades_report_itself_when_nothing_else_does(
+    hass: HomeAssistant, hub: FakeHub, freezer: FrozenDateTimeFactory
+) -> None:
+    """At the longest verify delay the move counts as stalled and polling is idle, and push is off.
+
+    So the only /status read after the report-in is verify's own; without it
+    verify would decide on the old position and re-send to a shade that is there.
+    """
+    entry = await _setup(hass, {"verify_enabled": True, "verify_delay_sec": 120})
+    hub.missed_reports = True
+
+    await _call(hass, SERVICE_OPEN_COVER, COVER[KITCHEN])
+    await _poll(hass, freezer, 121)
+    assert _coordinator(entry).update_interval == IDLE  # stalled
+    calls = hub.status_calls
+    await _poll(hass, freezer, REPORT_TICK)
+    assert hub.status_calls == calls + 1  # verify's read, and no poll
+    assert [is_status_request(cmd) for cmd in hub.commands] == [False, True]
+    assert hass.states.get(COVER[KITCHEN]).attributes[ATTR_CURRENT_POSITION] == 100
+
+
+async def test_verify_retries_as_soon_as_the_shades_report_shows_it_short(
+    hass: HomeAssistant, hub: FakeHub, freezer: FrozenDateTimeFactory
+) -> None:
+    """With push on the report arrives within seconds, and the retry follows it without the full wait."""
+    await _setup(hass, {**VERIFY_OPTIONS, **PUSH_OPTIONS})
+    hub.stuck = True
+
+    await _call(hass, SERVICE_OPEN_COVER, COVER[KITCHEN])
+    await _poll(hass, freezer, VERIFY_TICK)
+    await pump(hass)
+    assert [is_status_request(cmd) for cmd in hub.commands] == [False, True, False]
+    assert (hub.commands[2][BOTTOM], hub.commands[2][MIDDLE]) == (100, 0)
+
+    await _poll(hass, freezer, VERIFY_TICK)
+    await _poll(hass, freezer, REPORT_TICK)
+    assert len(hub.commands) == 3
+
+
+async def test_verify_decides_when_the_wait_runs_out_even_with_push_on(
+    hass: HomeAssistant, hub: FakeHub, freezer: FrozenDateTimeFactory
+) -> None:
+    """A shade that never reports (or a stream that is down) costs the wait and nothing more."""
+    await _setup(hass, {**VERIFY_OPTIONS, **PUSH_OPTIONS})
+    hub.stuck = True
+    hub.silent_status_requests = True
+
+    await _call(hass, SERVICE_OPEN_COVER, COVER[KITCHEN])
+    await _poll(hass, freezer, VERIFY_TICK)
+    await pump(hass)
+    assert len(hub.commands) == 2
+    await _poll(hass, freezer, STATUS_REPORT_WAIT_SEC - 1)
+    assert len(hub.commands) == 2
+    await _poll(hass, freezer, 2)
+    assert [is_status_request(cmd) for cmd in hub.commands] == [False, True, False]
+
+
+async def test_a_failed_status_request_leaves_the_retry_decision_standing(
+    hass: HomeAssistant, hub: FakeHub, freezer: FrozenDateTimeFactory, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.DEBUG, logger="custom_components.shadeauto.coordinator")
+    await _setup(hass, VERIFY_OPTIONS)
+    hub.stuck = True
+    hub.reject_status_requests = True
+
+    await _call(hass, SERVICE_OPEN_COVER, COVER[KITCHEN])
+    await _poll(hass, freezer, VERIFY_TICK)  # no wait after a failed request: the retry follows at once
+    assert [is_status_request(cmd) for cmd in hub.commands] == [False, True, False]
+    assert "status request failed" in caplog.text
+    assert "Retry for UID" not in caplog.text
+
+
+async def test_a_newer_command_during_the_report_wait_wins(
+    hass: HomeAssistant, hub: FakeHub, freezer: FrozenDateTimeFactory
+) -> None:
+    await _setup(hass, VERIFY_OPTIONS)
+    hub.stuck = True
+
+    await _call(hass, SERVICE_OPEN_COVER, COVER[KITCHEN])
+    await _poll(hass, freezer, VERIFY_TICK)
+    assert is_status_request(hub.commands[-1])
+    await _call(hass, SERVICE_SET_COVER_POSITION, COVER[KITCHEN], **{ATTR_POSITION: 20})  # while verify waits
+    await _poll(hass, freezer, REPORT_TICK)
+    assert len(hub.commands) == 3  # the open is not re-sent
+
+    await _poll(hass, freezer, VERIFY_TICK)  # the newer command's own verify, status request and retry
+    await _poll(hass, freezer, REPORT_TICK)
+    assert [(cmd.get(BOTTOM), cmd.get(STATUS_REQUEST)) for cmd in hub.commands] == [
+        (100, None),
+        (None, 0),
+        (20, None),
+        (None, 0),
+        (20, None),
+    ]
+
+
+@pytest.mark.parametrize("request_fails", [False, True])
+async def test_a_newer_command_while_the_status_request_is_in_flight_wins(
+    hass: HomeAssistant, hub: FakeHub, freezer: FrozenDateTimeFactory, request_fails: bool
+) -> None:
+    """Whether the status request is answered or fails, a command issued meanwhile is not overwritten by a retry."""
+    await _setup(hass, VERIFY_OPTIONS)
+    hub.stuck = True
+    hub.reject_status_requests = request_fails
+    await _call(hass, SERVICE_OPEN_COVER, COVER[KITCHEN])
+
+    # Held posts block their tasks, so only spin the loop here (async_block_till_done would wait on them).
+    hub.control_gate = asyncio.Event()  # the hub holds the status request in flight
+    await _run_queued(hass, freezer, int(VERIFY_TICK))
+    assert is_status_request(hub.commands[-1])
+    call = hass.async_create_task(
+        hass.services.async_call(
+            COVER_DOMAIN,
+            SERVICE_SET_COVER_POSITION,
+            {ATTR_ENTITY_ID: COVER[KITCHEN], ATTR_POSITION: 20},
+            blocking=True,
+        )
+    )
+    await _run_queued(hass, freezer, 0)  # registered; its post waits for the status request to finish
+    hub.control_gate.set()
+    await call
+    await _poll(hass, freezer, REPORT_TICK)
+    assert [(cmd.get(BOTTOM), cmd.get(STATUS_REQUEST)) for cmd in hub.commands] == [
+        (100, None),
+        (None, 0),
+        (20, None),
+    ]
+
+
+async def test_unload_during_the_report_wait_leaves_nothing_behind(
+    hass: HomeAssistant, hub: FakeHub, freezer: FrozenDateTimeFactory
+) -> None:
+    """The wait's timer and the verify die with the entry (verify_cleanup fails the test otherwise)."""
+    entry = await _setup(hass, {**VERIFY_OPTIONS, **PUSH_OPTIONS})
+    hub.stuck = True
+    hub.silent_status_requests = True
+
+    await _call(hass, SERVICE_OPEN_COVER, COVER[KITCHEN])
+    await _poll(hass, freezer, VERIFY_TICK)
+    await pump(hass)
+    assert len(hub.commands) == 2
+
+    assert await hass.config_entries.async_unload(entry.entry_id)
+    await hass.async_block_till_done()
+    await _poll(hass, freezer, REPORT_TICK)
+    assert len(hub.commands) == 2
 
 
 async def test_failed_retry_is_logged_once_and_the_shade_recovers_with_the_hub(
@@ -490,7 +733,10 @@ async def test_the_grace_and_the_verify_delay_start_when_the_post_is_answered(
     await _poll(hass, freezer, PENDING_GRACE_SEC + 1)
     assert coordinator.get_target(uid, AXIS_BOTTOM) == 35  # dropped: back to the hub's target
     await _poll(hass, freezer, VERIFY_TICK - PENDING_GRACE_SEC - 1)
-    assert [(cmd[BOTTOM], cmd[MIDDLE]) for cmd in hub.commands] == [(90, 0)]  # the verify's one retry
+    await _poll(hass, freezer, REPORT_TICK)
+    status_request, retry = hub.commands  # the verify's status request, then its one retry
+    assert status_request[STATUS_REQUEST] == 0
+    assert (retry[BOTTOM], retry[MIDDLE]) == (90, 0)
 
 
 async def test_a_command_cancelled_in_flight_leaves_no_pending_target_behind(

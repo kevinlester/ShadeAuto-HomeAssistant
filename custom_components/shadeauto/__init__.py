@@ -1,7 +1,9 @@
 """ShadeAuto: local control of Norman shades through the ShadeAuto hub.
 
 Setup wires the pieces together: :class:`ShadeAutoApi` talks HTTP to the hub,
-:class:`ShadeAutoCoordinator` polls it and tracks commanded moves, and the
+:class:`ShadeAutoCoordinator` polls it and tracks commanded moves,
+:class:`NotificationListener` (unless push updates are off) refreshes the
+coordinator whenever the hub announces a change, and the
 cover/sensor/binary_sensor platforms render one device per shade.
 """
 
@@ -21,6 +23,7 @@ from .const import CONF_HOST, DOMAIN, MANUFACTURER, PLATFORMS
 from .coordinator import ShadeAutoCoordinator
 from .entity import hub_device_identifier, shade_device_identifier
 from .options import ShadeAutoOptions
+from .push import NotificationListener
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -31,6 +34,7 @@ class ShadeAutoRuntimeData:
 
     api: ShadeAutoApi
     coordinator: ShadeAutoCoordinator
+    listener: NotificationListener | None = None  # None while push updates are off
 
 
 type ShadeAutoConfigEntry = ConfigEntry[ShadeAutoRuntimeData]
@@ -58,6 +62,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ShadeAutoConfigEntry) ->
 
     entry.runtime_data = ShadeAutoRuntimeData(api=api, coordinator=coordinator)
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+
+    if options.push_enabled:
+        # After the first refresh, so the stream only adds to a working setup.
+        # A config-entry background task: unload and shutdown cancel it.
+        entry.runtime_data.listener = NotificationListener(hass, entry, coordinator)
+        entry.runtime_data.listener.async_start()
     return True
 
 

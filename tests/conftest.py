@@ -5,7 +5,9 @@ The fixture JSON under ``tests/fixtures`` was captured from a real NienMade hub
 scrubbed of identifying values. ``FakeHub`` serves those documents and keeps live
 per-shade state so tests can issue commands and watch the integration converge.
 Other shade families are added at runtime with :meth:`FakeHub.add_shade`; the
-files themselves stay real captures.
+files themselves stay real captures. ``/notification`` is served as a live
+stream (:class:`StreamingResponse`) that the fake hub writes its change events
+to, the way the real hub does.
 """
 
 from __future__ import annotations
@@ -15,8 +17,10 @@ import json
 from pathlib import Path
 import time
 from typing import Any
+from unittest import mock
 
 import aiohttp
+from aiohttp.streams import StreamReader
 import pytest
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 from pytest_homeassistant_custom_component.test_util.aiohttp import (
@@ -53,7 +57,10 @@ BATTERY_LOW = {uid: f"binary_sensor.{slug}_battery_low" for uid, slug in SLUG.it
 BOTTOM = "BottomRailPosition"
 MIDDLE = "MiddleRailPosition"
 MOTOR_STOP = "MotorStop"
+STATUS_REQUEST = "StatusRequest"
 TARGET = {BOTTOM: "TargetBottomRailPosition", MIDDLE: "TargetMiddleRailPosition"}
+# Report requests the hub does not confine to one shade (docs/HUB_PROTOCOL.md 4.6).
+HUB_WIDE_FIELDS = ("ReportBatteryLevel",)
 
 # How the hub moves each family's rails, as FakeHub models them. Kept apart
 # from the integration's own profile table on purpose: the tests check that
@@ -79,6 +86,60 @@ def load_json(name: str) -> Any:
 
 def _now() -> int:
     return int(time.time())
+
+
+def is_status_request(command: dict[str, Any]) -> bool:
+    """True for a ``/control`` post that asked a shade to report in rather than move or stop."""
+    return STATUS_REQUEST in command
+
+
+class StreamingResponse(AiohttpClientMockResponse):
+    """A ``/notification`` reply that stays open, like the hub's.
+
+    The stock mock response builds a new StreamReader, already fed and ended,
+    from a fixed body on every ``.content`` access. This one hands out one
+    live reader that :class:`FakeHub` writes to, so the integration sees bytes
+    arrive over time, and the stream ends only when the hub ends it. When the
+    integration lets go of the reply (aiohttp calls ``release()`` as its
+    ``async with`` exits) the stream counts as closed and the hub stops
+    writing to it.
+    """
+
+    def __init__(self, url: Any, hub: FakeHub) -> None:
+        super().__init__("POST", url, headers={"Content-Type": "application/octet-stream"})
+        self.reader = StreamReader(mock.Mock(_reading_paused=False), limit=2**16, loop=asyncio.get_running_loop())
+        self.ended = False  # the hub ended it (EOF or an error)
+        self.closed = False  # the integration let go of it
+        self._hub = hub
+
+    @property
+    def content(self) -> StreamReader:
+        return self.reader
+
+    def write(self, data: bytes) -> None:
+        if not self.ended:
+            self.reader.feed_data(data)
+
+    def end(self, error: BaseException | None = None) -> None:
+        """End the stream: EOF, or ``error`` raised to the reader."""
+        if self.ended:
+            return
+        self.ended = True
+        if error is None:
+            self.reader.feed_eof()
+        else:
+            self.reader.set_exception(error)
+
+    def release(self) -> None:
+        if not self.closed:
+            self.closed = True
+            self._hub.streams.remove(self)
+
+    def close(self) -> None:
+        self.release()
+
+    async def __aexit__(self, *exc_info: Any) -> None:
+        self.release()
 
 
 class FakeHub:
@@ -121,6 +182,36 @@ class FakeHub:
     post after it is recorded in :attr:`commands` and before the hub applies it,
     until the event is set (a slow round trip, so a test can plan a second
     command while the first is in flight).
+
+    ``/notification`` answers with a :class:`StreamingResponse` that stays
+    open: ``stream_answer`` (``{"Error": "Success."}``, the acknowledgement)
+    at once (unless ``acknowledge_streams`` is off, or ending the stream right
+    after it with ``close_streams_after_answer``), then
+    ``{"Status": <ms>, "PeripheralList": [uid]}`` whenever a shade
+    changes: when a move command is accepted, when a move settles, when a stop
+    point is reported, for :meth:`external_command` and :meth:`external_move`,
+    and when a shade reports in. Like the hub it replays nothing to a stream
+    opened later. :meth:`emit`, :meth:`emit_raw` and :meth:`announce` write
+    arbitrary objects or bytes (split objects, several in one chunk),
+    :meth:`drop_streams` ends every open stream and :meth:`break_streams`
+    fails it; ``refuse_streams`` makes opening one fail. The open replies are
+    in :attr:`streams`.
+
+    ``StatusRequest: 0`` makes the shade report in, as on the real hub: its
+    per-shade ``Timestamp`` moves and the stream announces it (unless
+    ``silent_status_requests``); 170 is accepted and does nothing.
+    ``reject_status_requests`` answers it with ``Error 2``. With
+    ``missed_reports`` a move does arrive but the hub does not hear about it,
+    so ``/status`` keeps the old position until the shade reports in. With
+    ``report_in_rewrites_target`` a report-in also sets the shade's targets to
+    its positions, as kedube/ha-norman reports and our hub has not shown yet
+    (docs/HUB_PROTOCOL.md 4.6, question 15). ``status_gate``, an
+    :class:`asyncio.Event`, holds every ``/status`` reply after the hub has
+    built it, until the event is set (a read in flight while things change).
+    :meth:`finish_move` ends a move now, whatever ``stuck`` or
+    ``settle_after_polls`` say. A ``StatusRequest`` without a shade id or any
+    of ``HUB_WIDE_FIELDS`` fails the test: the real hub would act on every
+    shade.
     """
 
     def __init__(self, mocker: AiohttpClientMocker) -> None:
@@ -143,6 +234,17 @@ class FakeHub:
         self.offline = False
         self.omit_fields: tuple[str, ...] = ()
         self.control_gate: asyncio.Event | None = None
+        self.streams: list[StreamingResponse] = []  # open /notification replies
+        self.acknowledge_streams = True
+        self.stream_answer: Any = {"Error": "Success."}
+        self.close_streams_after_answer = False
+        self.refuse_streams = False
+        self.silent_status_requests = False
+        self.reject_status_requests = False
+        self.missed_reports = False
+        self.report_in_rewrites_target = False
+        self.status_gate: asyncio.Event | None = None
+        self._unheard: set[int] = set()  # arrived, but /status does not show it until the shade reports in
         self.status_calls = 0
         self._polls_until_settle: dict[int, int] = {}
         self._polls_until_stop: dict[int, tuple[int, int]] = {}  # uid -> (polls left, stop point)
@@ -228,22 +330,73 @@ class FakeHub:
             if value is not None:
                 self.shades[uid][TARGET[field]] = value
                 self.shades[uid][field] = value
+        self.shades[uid]["Timestamp"] = _now()
+        self.announce(uid)
 
     def external_command(self, uid: int, *, bottom: int, middle: int = 0) -> None:
         """Simulate the vendor app issuing a command: targets change now, actuals settle later."""
         self.shades[uid][TARGET[BOTTOM]] = bottom
         self.shades[uid][TARGET[MIDDLE]] = middle
+        self.announce(uid)
         self._schedule_settle(uid)
+
+    def finish_move(self, uid: int) -> None:
+        """The shade reports the end of its move now, whatever ``stuck`` or ``settle_after_polls`` say."""
+        self._polls_until_settle.pop(uid, None)
+        self._unheard.discard(uid)
+        self._settle(uid)
+
+    # ----- the /notification stream -----
+
+    def emit_raw(self, data: bytes) -> None:
+        """Write ``data`` as it is to every open stream (part of an object, several objects, whitespace)."""
+        for stream in list(self.streams):
+            stream.write(data)
+
+    def emit(self, item: Any) -> None:
+        """Write one JSON object to every open stream."""
+        self.emit_raw(json.dumps(item).encode())
+
+    def announce(self, *uids: int) -> None:
+        """The hub's change event naming ``uids``."""
+        self.emit({"Status": int(time.time() * 1000), "PeripheralList": list(uids)})
+
+    def drop_streams(self) -> None:
+        """End every open stream the way a closed connection does (EOF)."""
+        for stream in list(self.streams):
+            stream.end()
+
+    def break_streams(self) -> None:
+        """Make every open stream fail with a connection error."""
+        for stream in list(self.streams):
+            stream.end(aiohttp.ClientPayloadError("connection reset by the hub"))
+
+    # ----- moves -----
 
     def _schedule_settle(self, uid: int) -> None:
         if self.stuck:
             return
-        if self.settle_after_polls is None:
+        if self.missed_reports:
+            self._unheard.add(uid)
+        elif self.settle_after_polls is None:
             self._settle(uid)
         else:
             self._polls_until_settle[uid] = self.settle_after_polls
 
-    def _settle(self, uid: int) -> None:
+    def _report_in(self, uid: int) -> None:
+        """The shade answers a StatusRequest: the hub learns where it is, and says so on the stream."""
+        if uid in self._unheard:
+            self._unheard.discard(uid)
+            self._settle(uid, announce=False)
+        if self.report_in_rewrites_target:
+            shade = self.shades[uid]
+            for field in (BOTTOM, MIDDLE) if self.family(uid) != SINGLE_RAIL else (BOTTOM,):
+                shade[TARGET[field]] = shade[field]
+        self.shades[uid]["Timestamp"] = _now()
+        if not self.silent_status_requests:
+            self.announce(uid)
+
+    def _settle(self, uid: int, *, announce: bool = True) -> None:
         """Finish the move: actuals land at the targets (plus ``landing_offset``), as the shade's family allows.
 
         Sheer vanes only count at bottom 0; a single-rail shade has no middle rail to move.
@@ -256,11 +409,16 @@ class FakeHub:
             shade[field] = max(0, min(100, int(shade[TARGET[field]]) + self.landing_offset))
         if family == SINGLE_RAIL:
             shade[MIDDLE] = 0
+        shade["Timestamp"] = _now()
+        if announce:
+            self.announce(uid)
 
     def _report_stop(self, uid: int, point: int) -> None:
         """Report where the motor stopped, the way the hub did ~35 s after MotorStop (log C4b)."""
         shade = self.shades[uid]
         shade[BOTTOM] = shade[TARGET[BOTTOM]] = point
+        shade["Timestamp"] = _now()
+        self.announce(uid)
         family = self.family(uid)
         if family == TWO_RAIL:
             # Unverified for the middle rail; modelled as a rail that had not moved.
@@ -325,24 +483,37 @@ class FakeHub:
             "RequestTimestamp": now,
             "Timestamp": now * 1000,
         }
+        if self.status_gate is not None:
+            await self.status_gate.wait()
         return self._ok(url, body)
 
     async def _control(self, method: str, url: Any, data: dict[str, Any] | None) -> AiohttpClientMockResponse:
         self._accept("control", data)
         assert data is not None
+        # The real hub would act on every shade for these (docs/HUB_PROTOCOL.md 4.6).
+        assert not any(field in data for field in HUB_WIDE_FIELDS), f"hub-wide report request sent: {data}"
+        assert STATUS_REQUEST not in data or data.get("PeripheralUID"), f"StatusRequest without a shade: {data}"
         self.commands.append(data)
         if self.control_gate is not None:
             await self.control_gate.wait()
         uid = int(data["PeripheralUID"])
         now = _now()
         envelope = {"TaskID": data.get("TaskID"), "RequestTimestamp": now, "Timestamp": now * 1000}
-        if self.reject or (MIDDLE in data and BOTTOM not in data):
+        if (
+            self.reject
+            or (MIDDLE in data and BOTTOM not in data)
+            or (self.reject_status_requests and STATUS_REQUEST in data)
+        ):
             return self._ok(url, {"PeripheralUID": uid, "Error": 2, **envelope})
 
         shade = self.shades[uid]
         applied: dict[str, Any] = {}
         if self.ignore_commands:
-            applied = {k: v for k, v in data.items() if k in (BOTTOM, MIDDLE, MOTOR_STOP)}
+            applied = {k: v for k, v in data.items() if k in (BOTTOM, MIDDLE, MOTOR_STOP, STATUS_REQUEST)}
+        elif STATUS_REQUEST in data:
+            if data[STATUS_REQUEST] == 0:  # 170 is accepted and does nothing
+                self._report_in(uid)
+            applied[STATUS_REQUEST] = data[STATUS_REQUEST]
         elif MOTOR_STOP in data:
             # The motor stops; the hub reports the stop point now or after N polls (see the class docstring).
             self._polls_until_settle.pop(uid, None)
@@ -360,19 +531,24 @@ class FakeHub:
                 shade[TARGET[MIDDLE]] = middle
             applied[BOTTOM] = shade[TARGET[BOTTOM]]
             applied[MIDDLE] = middle
+            self.announce(uid)  # the hub took a new target
             self._schedule_settle(uid)
         else:
             applied = {k: v for k, v in data.items() if k not in ("PeripheralUID", "TaskID", "Timestamp", "ThingName")}
         return self._ok(url, {"PeripheralUID": uid, **applied, "Error": 0, **envelope})
 
     async def _notification(self, method: str, url: Any, data: dict[str, Any] | None) -> AiohttpClientMockResponse:
-        """Answer empty at once; the integration does not read this endpoint.
-
-        The real hub keeps the reply open as a never-ending stream of events
-        (docs/HUB_PROTOCOL.md 2.5), which only ``tools/hubwatch.py --notify`` reads.
-        """
+        """Open a stream the way the hub does (docs/HUB_PROTOCOL.md 2.5): acknowledged at once, then left open."""
         self._accept("notification", data)
-        return self._ok(url, None, text="")
+        if self.refuse_streams:
+            raise aiohttp.ClientConnectionError("stream refused")
+        response = StreamingResponse(url, self)
+        self.streams.append(response)
+        if self.acknowledge_streams:
+            response.write(json.dumps(self.stream_answer).encode())
+            if self.close_streams_after_answer:
+                response.end()
+        return response
 
 
 @pytest.fixture(autouse=True)
@@ -388,13 +564,17 @@ def hub(aioclient_mock: AiohttpClientMocker) -> FakeHub:
 
 
 # Options that keep tests deterministic: no inter-command pacing, no delayed
-# verify timers and no slider animation task. Tests that exercise those
-# features override the options explicitly.
+# verify timers, no slider animation task, and no /notification stream, so
+# every refresh comes from a poll or a command as in 0.5.0 and status_calls and
+# settle_after_polls stay predictable. Tests that exercise those features
+# override the options explicitly.
 FAST_OPTIONS: dict[str, Any] = {
     "send_spacing_sec": 0.0,
     "verify_enabled": False,
     "estimation_enabled": False,
+    "push_enabled": False,
 }
+PUSH_OPTIONS: dict[str, Any] = {"push_enabled": True}
 
 
 def make_entry(options: dict[str, Any] | None = None) -> MockConfigEntry:
@@ -419,6 +599,17 @@ def config_entry(hass: Any) -> MockConfigEntry:
 async def setup_integration(hass: Any, entry: MockConfigEntry) -> None:
     """Set up ``entry`` and wait for the platforms to finish loading."""
     assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+
+
+async def pump(hass: Any) -> None:
+    """Let the stream listener, and the refreshes it asks for, handle what the fake hub wrote; time stands still.
+
+    The listener is a background task, which ``async_block_till_done`` does
+    not wait for, so give it a few turns of the event loop first.
+    """
+    for _ in range(10):
+        await asyncio.sleep(0)
     await hass.async_block_till_done()
 
 

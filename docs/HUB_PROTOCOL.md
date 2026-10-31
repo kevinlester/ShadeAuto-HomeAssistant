@@ -21,7 +21,7 @@ backed by one of these sources, and the source is named next to the claim:
 | "kedube" | `docs/NORMAN_API.md` in [kedube/ha-norman](https://github.com/kedube/ha-norman), another Home Assistant integration for the same hub. Its author tested a `NienMadeHub` on firmware 6.1.25 with 13 shades of types 32 and 33, captured the vendor app's traffic and read the app's network library; types 48/1 and 80/1 come from users' diagnostics in its issues #2 and #5. Section names are quoted where cited ("Waking a blind", "Cover types", ...). Nothing from it has been reproduced here unless the text says so. |
 | "PR #9" | [kevinlester/ShadeAuto-HomeAssistant pull request #9](https://github.com/kevinlester/ShadeAuto-HomeAssistant/pull/9), two-rail (top-down/bottom-up) support for type 33. Its `docs/TDBU-REGRESSION.md` records a live test on one real type 33 shade on 2026-10-13. |
 | "PR #7" | [kevinlester/ShadeAuto-HomeAssistant pull request #7](https://github.com/kevinlester/ShadeAuto-HomeAssistant/pull/7), vane tilt for a shade whose `ModuleType` it does not name (`TILT_SUPPORT.md`). |
-| `custom_components/shadeauto/*.py` (`api.py`, `const.py`, `coordinator.py`, `cover.py`, `entity.py`, `util.py`), `tools/hubwatch.py`, `README.md` | How the integration and the watch tool build requests and consume replies today. |
+| `custom_components/shadeauto/*.py` (`api.py`, `const.py`, `coordinator.py`, `cover.py`, `entity.py`, `push.py`, `util.py`), `tools/hubwatch.py`, `README.md` | How the integration and the watch tool build requests and consume replies today. |
 
 Anything that is a guess is marked **unverified**. If you find out more, fix the
 text and name your evidence.
@@ -68,8 +68,8 @@ otherwise, every observation in this document is of a PerfectSheer.
 
 **ThingName.** `/registration` returns it. `/GetAllPeripheral` requires it:
 sending `ThingName: null` produces the error envelope in `error_invalid.json`.
-Both clients also send it on `/control`, and the watch tool on
-`/notification`. Whether `/control` requires it is **unverified** (it was never
+Both clients also send it on `/control` and on `/notification` (the
+integration since 0.6.0). Whether `/control` requires it is **unverified** (it was never
 omitted); kedube found that `/notification` ignores its request body
 altogether (2.5). `/status` and `/registration` were only ever called with
 `{"Timestamp": <seconds>}` and work with that.
@@ -388,7 +388,12 @@ The per-shade fields are described in section 3.
 
 **What the integration uses it for.** The coordinator polls it every
 `poll_seconds` (default 30 s) while nothing is moving and every
-`motion_poll_sec` (default 2 s) while any shade is moving. It copies the actual
+`motion_poll_sec` (default 2 s) while any shade is moving. With push updates
+on (0.6.0, the default) it also reads it right after the `/notification`
+stream announces a change (debounced, so a burst of events costs one read)
+and after every (re)connect of that stream, because the stream does not
+replay what it missed (2.5); the polling continues unchanged as the fallback.
+It copies the actual
 and target position of both rails plus `BatteryVoltage`, `ModuleType`,
 `ModuleDetail` and `FirmwareVersion` per shade (`STATUS_FIELDS` in
 `coordinator.py`), and a shade counts as moving while actual != target on an
@@ -405,8 +410,11 @@ verify delay, when the coordinator compares the hub's `Target*` fields on
 both axes with what it sent: a target the hub never reflected means the
 command was lost and it is re-sent once; a target the hub reflected and then
 changed means the app, a remote or the hub itself (4.4) re-commanded the
-shade, and nothing is re-sent. The cover's slider estimate is dropped as soon
-as the hub's target stops matching the target it is estimating toward.
+shade, and nothing is re-sent. Before a re-send the shade is asked to report
+in (`StatusRequest`, 4.6) and `/status` is read once more, so a shade that
+arrived but had not reported yet is not sent the command twice. The cover's
+slider estimate is dropped as soon as the hub's target stops matching the
+target it is estimating toward.
 
 **Errors.** None observed. Top-level `Error` was 0 on every poll in the log
 (`hub Error=0` lines). Non-zero values are **unverified**.
@@ -427,10 +435,11 @@ only the wire format. Six rules you must know before sending anything:
 5. `MotorStop: 170` stops the motor, and the hub then re-targets the shade to
    wherever it stopped (4.6).
 6. `StatusRequest: 0` with a `PeripheralUID` makes that one shade report in
-   without moving. Without a `PeripheralUID` it becomes a hub-wide report-in,
-   and a hub-wide report-in closed one user's roller shades, so never send it
-   unscoped. Never send `ReportBatteryLevel` at all: a `PeripheralUID` does not
-   confine it to one shade (4.6).
+   without moving; the integration sends it before a verify retry. Without a
+   `PeripheralUID` it becomes a hub-wide report-in, and a hub-wide report-in
+   closed one user's roller shades, so never send it unscoped. Never send
+   `ReportBatteryLevel` at all: a `PeripheralUID` does not confine it to one
+   shade (4.6).
 
 **Request** (as `hubwatch.build_control_payload` and
 `ShadeAutoApi._send_control` build it: `PeripheralUID`, `TaskID` and
@@ -453,7 +462,7 @@ only the wire format. Six rules you must know before sending anything:
 | `TaskID` | always sent | Client-chosen integer; the hub echoes it in the reply. The integration uses `int(time.time()*1000) & 0x7FFFFFFF` (section 4.7). Whether the hub rejects a missing TaskID is **unverified**. |
 | `Timestamp` | always sent | Whole seconds; echoed as `RequestTimestamp`. Whether it is validated is **unverified**. |
 | `ThingName` | always sent when known | Whether `/control` requires it is **unverified**. |
-| command fields | one or more | `BottomRailPosition`, `MiddleRailPosition`, `MotorStop`, `StatusRequest`. `MiddleRailPosition` is rejected unless `BottomRailPosition` is also present (4.2); omitting `MiddleRailPosition` sets the middle target to 0 (4.3). `StatusRequest` goes alone, with value 0 (4.6). Section 6 lists the other field names the hub knows; most are limit, calibration or pairing commands and must not be sent. |
+| command fields | one or more | `BottomRailPosition`, `MiddleRailPosition`, `MotorStop`, `StatusRequest`. `MiddleRailPosition` is rejected unless `BottomRailPosition` is also present (4.2); omitting `MiddleRailPosition` sets the middle target to 0 (4.3). `StatusRequest` goes alone, with value 0 and always with a `PeripheralUID`; the integration sends it before a verify retry (4.6). Section 6 lists the other field names the hub knows; most are limit, calibration or pairing commands and must not be sent. |
 
 **Success response** (log C2b). The hub echoes the position fields it stored as
 targets, which includes a `MiddleRailPosition: 0` the request did not contain
@@ -502,9 +511,16 @@ the cover entity (`cover.py`) sends depends on the shade's profile (3.1):
   reported where that rail stopped) the command is refused instead of sent
   (see `docs/ARCHITECTURE.md`).
 
-The verify-and-retry logic resends the same payload, once, and only when the
-hub never reflected the targets it was sent; a retry overtaken by a newer
-command does not overwrite that command's pending state.
+When a shade has not arrived by the verify delay, the verify-and-retry logic
+resends the same payload, once, unless the hub reflected the targets it was
+sent and then changed them (the app, a remote or the hub itself re-commanded
+the shade); a retry overtaken by a newer command does not overwrite that
+command's pending state. Since 0.6.0 it first sends
+`{"PeripheralUID": <uid>, "StatusRequest": 0}` to that one shade, waits up
+to 10 s for it to report in (4.6), reads `/status` and applies the same two
+rules again: it re-sends only if the shade still has not arrived and the hub
+has not changed a target it had reflected. The integration never sends
+`StatusRequest` without a `PeripheralUID`.
 
 ### 2.5 `/notification`
 
@@ -515,11 +531,13 @@ each time a shade's target or position changes.
 > delivers notifications, and 0.4.0 removed the integration's `/notification`
 > code because of it. That was wrong. The fault was in how our clients read the
 > reply, not in the hub; "What we concluded on 2026-10-22, and why it was
-> wrong" below has the details. The integration does not use the stream yet
-> (0.5.0); push updates are planned for 0.6.0.
+> wrong" below has the details. Since 0.6.0 the integration uses the stream
+> for push updates ("What the integration uses it for" below).
 
-**Request** (as `tools/hubwatch.py --notify` and the 2026-10-23 probe send it;
-the values are illustrative)
+**Request** (as `tools/hubwatch.py --notify`, the 2026-10-23 probe and, since
+0.6.0, the integration's `ShadeAutoApi.notification_stream()` send it, the
+integration leaving out `ThingName` only while it does not know it yet; the
+values are illustrative)
 
 ```json
 {"ThingName": "us-east-1:00000000-0000-0000-0000-000000000000_0000000000000000", "Timestamp": 1792744658, "Timeout": 300}
@@ -619,11 +637,46 @@ discarded (**unverified**). The integration before 0.4.0 had the same flaw:
 `notification_timeout_sec` (default 2 s), and returned `""` when that expired.
 Neither client could ever have shown an event.
 
-**What the integration uses it for.** Nothing yet; 0.5.0 learns everything by
-polling `/status` (2.3). Push updates are planned for 0.6.0: an event would
-trigger an immediate `/status` read instead of waiting for the next poll, with
-a per-shade `StatusRequest` before a retry (4.6). `tools/hubwatch.py --notify`
-is the only client in this repository that calls the endpoint.
+**What the integration uses it for.** Push updates, since 0.6.0. With the
+option "Use the hub's change notifications (push updates)" (`push_enabled`,
+on by default) the integration holds one stream per hub open for as long as
+the config entry is loaded (`docs/ARCHITECTURE.md`, "Push updates"):
+
+- It reads the reply as it arrives and splits the bytes into objects itself
+  (`JsonStreamSplitter` in `util.py`, the same `raw_decode` approach as
+  `hubwatch.py`'s `StreamSplitter`); it never waits for the body to end.
+  Only connecting is timed; a quiet stream is normal.
+- The first object, `{"Error": "Success."}`, is taken as the stream being
+  open, not checked like the integer `Error` of the other endpoints. The
+  integer 0 is accepted too; any other `Error` value (none seen) is taken as
+  a refusal, and the stream is closed and retried like a failed one.
+- Every event with at least one shade id triggers a `/status` read (2.3)
+  through a debounce: the first event is read at once, and events in the
+  following second share one more read at its end (`REFRESH_COOLDOWN_SEC`),
+  so a burst costs a read a second at most. The event's ids say only which shades changed; positions always come
+  from `/status`. Each command therefore gives two quick reads: one when the
+  hub takes the target, one when the shade reports the end of the move. An
+  event naming a shade also ends a verify's wait for that shade's report-in
+  (4.6).
+- An `UpdateTime` object is treated as a plain refresh trigger in this
+  release. `/GetAllPeripheral` is not re-read, so a shade renamed in the app
+  keeps its old name until the entry is reloaded.
+- It closes and reopens the stream every 300 s, as kedube does, and reopens
+  it after any disconnect (an EOF counts as one), waiting 5 s after the first
+  failure and twice as long after each further failure in a row, up to 60 s.
+  A stream counts as working again, which starts the waits over, only once
+  it has stayed open 60 s after the acknowledgement, so a hub that answered
+  and then closed every stream at once would be reopened once a minute, not
+  every 5 s.
+- After each reconnect it reads `/status` at once, because the events missed
+  while the stream was down are never replayed.
+- Polling (2.3) continues unchanged as the fallback, so with the stream down
+  updates come from polling alone, as in 0.5.0. With the option off the
+  integration never calls this endpoint. (The option does not affect the
+  per-shade `StatusRequest` that verify sends before a retry, 4.6.)
+
+`tools/hubwatch.py --notify` reads the stream the same way, for watching the
+hub by hand.
 
 **Errors.** None observed. The first object's `Error` was `"Success."`; other
 values are **unverified**.
@@ -792,7 +845,7 @@ by sending commands to shade 12177, a PerfectSheer, and watching `/status` at
 | `BottomRailPosition` | 0-100 | Move the bottom rail. 0 lowers fully, 100 raises fully. |
 | `MiddleRailPosition` | 0-100 | PerfectSheer: set the vane tilt, 0 closed, 100 open, only meaningful when the shade is fully lowered (4.4). Two-rail shades: move the upper rail (3.1). |
 | `MotorStop` | 170 | Stop whatever the motor is doing right now. |
-| `StatusRequest` | 0, with `PeripheralUID` | Ask that one shade to report in. Nothing moves (4.6). |
+| `StatusRequest` | 0, with `PeripheralUID` | Ask that one shade to report in. Nothing moves (4.6). The integration sends it before a verify retry, and never without a `PeripheralUID`. |
 
 The hub accepts both position fields in one request. In C2b the shade was at
 bottom 50 / vanes 0; `{"BottomRailPosition": 0, "MiddleRailPosition": 100}`
@@ -917,8 +970,55 @@ Why it matters: a report-in is how the hub corrects a stale position. kedube
 saw the hub keep a wrong `MiddleRailPosition` for an hour until the shades
 reported in, and a shade that accepted a move but did not go keep "old position,
 new target" until it was asked; a report-in also overwrites the target with the
-actual position ("Waking a blind"). A per-shade `StatusRequest` before a retry
-is planned for 0.6.0; 0.5.0 does not send it.
+actual position ("Waking a blind").
+
+**What the integration uses it for.** Since 0.6.0, the verify step sends it
+before a retry. When a shade has not reached the target of our command
+`verify_delay_sec` after the post, and nobody else has re-commanded it, the
+coordinator sends `{"PeripheralUID": <uid>, "StatusRequest": 0}` (plus
+`TaskID`, `Timestamp` and `ThingName`, paced like every `/control` post),
+waits until the `/notification` stream names that shade or 10 s pass
+(`STATUS_REPORT_WAIT_SEC`), reads `/status`, and decides again by the same
+rules as before the request: re-send only if the shade still has not arrived
+and the hub has not changed a target it had reflected, except that a target
+the report-in set to the shade's position does not count as a change
+(below). 10 s leaves room over
+the 2.2 s seen here and kedube's "within 5 s on every try". The integration
+recognises the report only by the stream event, not by the per-shade
+`Timestamp` (section 3), so with push updates off or the stream down the
+wait always runs the full 10 s; that is so whatever `push_enabled` says,
+because the option governs only the stream. If the request fails, the verify
+goes ahead with the decision it had already made. The point is the
+shade that got there but had not reported yet: kedube saw single-rail (32/2)
+shades report a full close or open only 55-90 s after the command, and one of
+them, asked with a `StatusRequest` 30 s in, answered within 4 s that it had
+already arrived ("Notification stream, as observed"). The integration sends no
+other report-in: not on a schedule, not after a remote move, and never
+hub-wide.
+
+Two things here are **unverified**, and the integration is written so that
+neither can leave a shade short of our command:
+
+- Whether a report-in overwrites the hub's target with the shade's position,
+  as kedube says. Our one report-in (2026-10-23 log) was of a shade whose
+  target already equalled its position, so it could not show this
+  (question 15). If it does, a shade that took our target but did not move
+  (a transmission lost after the hub stored the target, 4.8) comes back from
+  the report-in with a reflected target that has changed, which would
+  otherwise read as someone else re-commanding the shade. So the second
+  check treats a target that was ours when the request went out and now
+  equals the position just reported as that rewrite, and re-sends the
+  command; only a target that changed to anything else counts as a
+  re-command.
+- What a report-in does to a shade that is still moving. The request goes
+  out whenever the shade is short of its target at the verify delay, which
+  can be 30 s, while a full PerfectSheer travel takes about 60 s and kedube's
+  single-rail shades reported full travels after 55-90 s, so it can reach a
+  shade in mid-move. Only a shade at rest has been tried here. If the hub
+  rewrites its target to an intermediate position, the rule above re-sends
+  our command, which restores the target; if it does not, the shade is short
+  of a target that is still ours and the command is re-sent as 0.5.0 would
+  have. Whether the motor itself reacts is open (question 15).
 
 **Only ever send it with a `PeripheralUID`.** kedube found that without one,
 `StatusRequest` becomes a hub-wide report-in (a `RoomID` alone does not confine
@@ -930,7 +1030,9 @@ closed the shades twice, with no move command sent; lone per-shade
 trigger. On another hub a `ReportBatteryLevel` closed nine type 33 shades.
 `ReportBatteryLevel` is not confined by a `PeripheralUID` either (kedube's
 isolated tests of 2026-10-14 moved shades in other rooms), so this project never
-sends it.
+sends it. The integration's rule follows from this: it builds a
+`StatusRequest` only for one shade's id, and never sends a hub-wide report-in
+in any form.
 
 **The 2026-10-22 test with 170 did not show this.** `{"RequestModuleInfo": 170}`
 (C8a) and `{"StatusRequest": 170}` (C8b) were both accepted with `Error: 0` and
@@ -1109,8 +1211,9 @@ target or position changed, or that a shade reported in (2.5, 2026-10-23 log).
 It carries only the shade's id, so a client still reads `/status` to learn what
 changed, and it does not replay what happened while it was closed, so a client
 also reads `/status` after every reconnect. A push-driven client therefore
-still polls, just much less urgently. 0.5.0 does not use the stream yet and
-polls `/status` as described in 2.3; push updates are planned for 0.6.0.
+still polls, just much less urgently. That is how 0.6.0 uses it: an event
+triggers a `/status` read, every reconnect is followed by one, and the polling
+in 2.3 carries on as the fallback (2.5).
 
 ### 5.4 What the hub sees of app and remote
 
@@ -1135,7 +1238,11 @@ polls `/status` as described in 2.3; push updates are planned for 0.6.0.
   believes nothing is moving.
 - **Stale positions after a remote move** might be fixed by a per-shade
   `StatusRequest` (4.6), which makes the shade report where it is. That has
-  not been tried on a shade the hub had lost track of (**unverified**). The
+  not been tried on a shade the hub had lost track of (**unverified**), and
+  the integration does not do it: it sends a `StatusRequest` only before a
+  verify retry of its own command, so a remote move the hub missed stays
+  missed until the shade reports in by itself or is next commanded. Push
+  updates do not change this; they only show sooner what the hub knows. The
   stream may also say more than `/status` here: in C5 the long-poll request
   that covered the remote phase lasted 75 s instead of 60 s, which suggests the
   hub wrote something to the stream then (2.5), but what it was was discarded.
@@ -1159,7 +1266,7 @@ knows how to send to a shade, with their default or trigger values".
 | `MiddleRailPosition`, `TargetMiddleRailPosition` | 100 | Vane tilt / target on PerfectSheer. Fully exercised. Other families: 3.1. |
 | `MotorStop` | 170 | Stops the motor. Exercised (C4b). |
 | `RequestModuleInfo` | 0 | Sent as 170: accepted, no visible effect seen (C8a), but the watcher could not have seen a report-in (4.6). kedube: as 0 with a `PeripheralUID`, the shade reports in. Purpose otherwise **unverified**. |
-| `StatusRequest` | (hub level, 0) | **Sent as 0 with a `PeripheralUID` on `/control`: that shade reports in** (`Error 0`, a stream event 2.2 s later, its `Timestamp` in `/status` moves, nothing moves; 2026-10-23 log, 4.6). Sent as 170 in C8b: accepted, effect unknown. **Never send it without a `PeripheralUID`**: kedube found it then sweeps the whole hub, and a hub-wide report-in closed one user's roller shades (4.6). Also appears at the top level of `/registration`. |
+| `StatusRequest` | (hub level, 0) | **Sent as 0 with a `PeripheralUID` on `/control`: that shade reports in** (`Error 0`, a stream event 2.2 s later, its `Timestamp` in `/status` moves, nothing moves; 2026-10-23 log, 4.6). **The integration sends it** (0.6.0), to one shade before a verify retry, and in no other form. Sent as 170 in C8b: accepted, effect unknown. **Never send it without a `PeripheralUID`**: kedube found it then sweeps the whole hub, and a hub-wide report-in closed one user's roller shades (4.6). Also appears at the top level of `/registration`. |
 | `CleanPairing` | (hub level, 0) | **Unverified.** Not sent. Top level of `/registration` only. Name suggests it erases the hub's pairings. **Never send.** |
 | `ReportBatteryLevel` | (hub level, 0) | Not sent. Top level of `/registration` only. kedube: the vendor app's battery report for a room (`RoomID`) or the whole hub; a `PeripheralUID` does not confine it; a hub-wide one closed type 48/1 roller shades on one hub and nine type 33 shades on another (4.6). **Never send.** |
 | `Switch` | 1 | Not sent. kedube: the vendor app's presets, `0` "Best privacy" (bottom 0, middle 100) and `1` "Best view" (100, 100), addressed by `RoomID` + `GroupID`, or the whole hub when neither is given. **It moves shades.** |
@@ -1180,7 +1287,8 @@ knows how to send to a shade, with their default or trigger values".
 | `FirmwareVersion` | `""` | Empty in the template; `"2.4.1"` in live status. |
 
 Only `BottomRailPosition`, `MiddleRailPosition`, `MotorStop`,
-`RequestModuleInfo` and `StatusRequest` have ever been sent from this project.
+`RequestModuleInfo` and `StatusRequest` have ever been sent from this project,
+and of those the integration sends all but `RequestModuleInfo`.
 Anything with Limit, Calibration, Pairing, Clean or Reverse in its name should
 be treated as potentially destructive until someone proves otherwise on a
 shade they are willing to re-calibrate.
@@ -1241,19 +1349,29 @@ try except where noted.
     about 35 s later (4.6); whether a stopped tilt keeps a partial vane
     position is unknown.
 13. **How long does a stream stay healthy on this hub?** kedube found that
-    long-lived streams can go quiet and reopens every 300 s; the 2026-10-23
-    probe lasted only 200 s. Leave `hubwatch.py --notify` running for a few
-    hours, move shades now and then, and check that every `/status` change
-    still has its event. Note when events stop, and whether reopening brings
-    them back.
+    long-lived streams can go quiet and reopens every 300 s, and 0.6.0 does
+    the same; the 2026-10-23 probe lasted only 200 s. Leave
+    `hubwatch.py --notify` running for a few hours, move shades now and then,
+    and check that every `/status` change still has its event. Note when
+    events stop, and whether reopening brings them back. If streams stay
+    healthy for hours, the recycle could be longer.
 14. **`UpdateTime` objects.** kedube reports them after renames in the app
     (2.5). Rename a shade in the app with `hubwatch.py --notify` running, and
-    record the object.
+    record the object. 0.6.0 treats them as a plain refresh trigger; re-reading
+    `/GetAllPeripheral` on a rename would let names follow the app.
 15. **`StatusRequest` on PerfectSheer.** One try, at 0 / 0, moved nothing
-    (4.6). Repeat with the shade raised and with its vanes open, and with a
-    position the hub has lost track of (question 6), before 0.6.0 starts
-    sending it before retries. Whether `StatusRequest: 170` (C8b) does the same
-    as 0 is open; there is no reason to send 170.
+    (4.6). 0.6.0 sends it before retries on the strength of that try and
+    kedube's per-shade tests on types 32 and 33. Repeat it with the shade
+    raised, with its vanes open, and with a position the hub has lost track of
+    (question 6), and record whether anything moves. Also send it to a shade
+    whose target differs from its position (a move in progress, or one the
+    shade did not carry out) and record whether the shade stops or carries
+    on, and whether the hub rewrites the target to the position, as kedube
+    says. 0.6.0 re-sends our command after such a rewrite (4.6), so either
+    answer is handled, but a shade that stops mid-move on a report-in would
+    be a reason to send it only once a move must have ended. Whether
+    `StatusRequest: 170` (C8b) does the same as 0 is open; there is no reason
+    to send 170.
 16. **Other shade families.** Everything in 3.1 outside PerfectSheer comes from
     other projects. If you own a single-rail, two-rail, SmartDrape or shutter
     shade, save a `/status` document with `hubwatch.py --raw`, then send

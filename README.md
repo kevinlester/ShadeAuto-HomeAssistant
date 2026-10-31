@@ -1,6 +1,6 @@
 # ShadeAuto (local) — Home Assistant Custom Integration
 
-Control Norman **ShadeAuto** shades locally through the hub's undocumented HTTP API: lift, **vane tilt** on PerfectSheer sheer shades, **both rails** of top-down/bottom-up and day/night shades, stop, and battery monitoring, with all the usual `cover` UI features.
+Control Norman **ShadeAuto** shades locally through the hub's undocumented HTTP API: lift, **vane tilt** on PerfectSheer sheer shades, **both rails** of top-down/bottom-up and day/night shades, stop, and battery monitoring, with all the usual `cover` UI features and **instant updates** from the hub's change notifications.
 
 ---
 > ⚠️ This uses **undocumented** local endpoints (`/NM/v1/*`). Firmware may change behavior. Isolate the hub and restrict access to TCP **10123**.
@@ -15,7 +15,9 @@ Control Norman **ShadeAuto** shades locally through the hub's undocumented HTTP 
 - One **Device** per shade, named as in the ShadeAuto app, showing model and motor firmware.
   - A **Cover** entity: open / close / **set position** (0–100) / **stop**, plus **tilt** (open / close / set / stop) on PerfectSheer shades. Two-rail shades get a second **Top** cover.
   - One **Battery (%)** sensor and one **Battery low** flag per shade.
-- **The hub is the source of truth.** Positions and vane state always converge to what the hub reports, including moves made from the ShadeAuto app or a remote. While a shade moves, the hub is polled every couple of seconds; otherwise every 30 s (both configurable).
+- **The hub is the source of truth.** Positions and vane state always converge to what the hub reports, including moves made from the ShadeAuto app or a remote.
+- **Instant updates.** The integration listens to the hub's change notifications, so Home Assistant follows a shade within a second or two of the hub hearing about it: the shade shows as opening or closing as soon as the hub takes a command, whether from Home Assistant or the ShadeAuto (Norman) app, and its new position appears as soon as the shade reports where it stopped. A move made with a physical remote shows when the shade reports in to the hub, which it does not always do (see [Limitations](#limitations)).
+- **Polling as the safety net.** The hub is still polled every 30 s, and every couple of seconds while a shade moves (both configurable), so nothing is lost when the notifications stop; see [How updates reach Home Assistant](#how-updates-reach-home-assistant).
 
 ## Entities per shade
 - `cover.<shade>`: `current_position` 0 = fully lowered, 100 = fully raised (on a two-rail shade, the bottom rail). PerfectSheer only: `current_tilt_position` 0 = vanes closed, 100 = vanes open (light through).
@@ -65,6 +67,14 @@ These shades have two rails that move independently, and each gets its own cover
 
 This follows upstream PR #9, which was tested on one real shade. This integration has not been run against a two-rail shade yet; please report how yours behaves.
 
+## How updates reach Home Assistant
+The hub has a notification stream: a connection it keeps open and on which it sends a short message whenever a shade's target or position changes. The message says which shade changed but not what changed, so the integration reads the hub's status as soon as one arrives (messages that arrive together share one read).
+
+- **While the stream is open**, a change shows within a second or two: a command the hub takes from Home Assistant or the app (the shade starts showing as opening or closing), the end of every move the hub hears about (the new position), and a shade reporting in.
+- **The stream is replaced every 5 minutes**, even when it looks fine, because long-lived streams have been seen to go quiet without an error.
+- **When the stream is down** (the hub restarted, its Wi-Fi dropped, the connection broke), the integration keeps trying to reopen it, waiting a little longer after each failed attempt, up to a minute. A stream counts as working again only once it has stayed open for a minute, so one the hub closes as soon as it is opened is treated as a failed attempt too. Meanwhile polling works exactly as in 0.5.0: every 30 s while idle, every couple of seconds while a shade moves. The hub does not resend what happened while the stream was down, so the integration reads the full status as soon as the stream is back. Nothing is lost; it just shows up at the next poll instead of at once.
+- **With push updates turned off** (see [Options](#options)), the integration never opens the stream and learns about changes by polling alone, as 0.5.0 did. Verify still asks a shade that has not arrived to report in before re-sending its command (see the verify option); turn verify off to send no such request at all.
+
 ## Requirements
 - ShadeAuto hub reachable on your LAN (port **10123**).
 - Home Assistant **2025.8** or newer. Older releases stay on 0.3.0 through HACS; see CONTRIBUTING.md for how the minimum is chosen.
@@ -75,14 +85,15 @@ If your hub gets a new IP address, open Settings → *Devices & Services* → **
 ## Options
 Settings → *Devices & Services* → **ShadeAuto** → **Configure**. Saving reloads the integration so changes take effect at once.
 
-- **Poll interval while idle**: `/status` poll interval while nothing is moving (default 30 s).
-- **Poll interval while a shade is moving**: faster polling during a move (default 2 s). The hub only reports a position once a move has finished, so this is how quickly Home Assistant notices.
+- **Use the hub's change notifications (push updates)** (`push_enabled`): listen to the hub's notification stream and read the hub's status as soon as it announces a change (default off). Off: the stream is never opened and Home Assistant learns about changes by polling alone, as in 0.5.0. Polling runs either way. It does not turn off verify's report-in request (see **Verify the shade arrived and retry once**), which then always waits the full 10 s.
+- **Poll interval while idle**: `/status` poll interval while nothing is moving (default 30 s). With push updates on, this is the safety net for anything the notifications miss.
+- **Poll interval while a shade is moving**: faster polling during a move (default 2 s). The hub only reports a position once a move has finished. With push updates on, its notification usually brings that news first; this poll catches it when the stream is down.
 - **Vane tilt** (`tilt_mode`): **Automatic** shows tilt controls and `current_tilt_position` on PerfectSheer shades, the only ones with vanes; **Off** hides them everywhere (default Automatic).
 - **Two-rail shades: keep the top rail at or above the bottom rail** (`collision_guard`): the collision guard described above (default on). Turn it off only if it stops a position your shade can really reach.
 - **Two-rail shades: minimum gap between the rails** (`rail_min_gap`): extra separation the guard keeps, 0–50 % (default 0 %).
 - **Low battery threshold**: battery % at which the `*_battery_low` flag turns on (default 20 %).
 - **Minimum time between shade commands**: gap between hub `/control` posts (default 1.5 s, up to 3 s). The hub has one radio and silently drops commands sent too close together while still reporting success. On a hub with thirteen shades, [kedube/ha-norman](https://github.com/kedube/ha-norman) lost commands at 1.0–1.2 s, and 1.5 s survived several whole-house runs but still lost the odd command over long use. If commands to many shades at once (scenes) get lost, raise it.
-- **Verify the shade arrived and retry once**: after the delay below, check that the position the hub reports reached what was asked for (lift and vanes on PerfectSheer, both rails on two-rail shades, the lift alone otherwise). If it did not, the command is re-sent once, whether the hub never took it (its target never matched ours) or took it and the shade did not get there. The exception is a hub that had taken the command and whose target has changed since: the shade was re-commanded from the app or a remote in the meantime, and nothing is re-sent.
+- **Verify the shade arrived and retry once**: after the delay below, check that the position the hub reports reached what was asked for (lift and vanes on PerfectSheer, both rails on two-rail shades, the lift alone otherwise). If it did not, the command is re-sent once, whether the hub never took it (its target never matched ours) or took it and the shade did not get there. The exception is a hub that had taken the command and whose target has changed since: the shade was re-commanded from the app or a remote in the meantime, and nothing is re-sent. Before re-sending, the integration asks that one shade to report its position to the hub (`StatusRequest`) and waits up to 10 s for the answer (the full 10 s with push updates off); a shade that had arrived but not yet told the hub is not sent the command again. If the report leaves the hub's target at the shade's position, which the hub is reported to do, that does not count as a re-command, and the command is still re-sent. Only that shade is asked, never every shade on the hub at once (see [Limitations](#limitations)). The request goes out whenever the shade is short of its target at the verify delay, so with a short delay and a long move it can reach a shade that is still travelling; nothing moved when it was sent to a shade at rest, but a moving shade has not been tried. Turning this option off sends no such request.
 - **Seconds to wait before verifying** (default 60 s, minimum 30 s), counted from when the command is sent, which in a scene can be a few seconds after the call. The hub reports where a shade ended up 10–35 s after a command; checking earlier would re-send a command to a shade that is still moving.
 - **Animate the position slider while a shade is moving**: interpolates `current_position` during a lift so the slider moves instead of jumping; the hub's position always wins once the move has settled, and the animation gives up early if the hub's target changes mid-move (someone re-commanded the shade from the app or a remote).
 - **Time for a full open or close**: travel time used by the animation. The default of 28 s is upstream's value for their shades; PerfectSheer shades were observed to need roughly 60 s for a full travel (28–35 s for half travels), so set it to about 60 for those.
@@ -103,7 +114,11 @@ Then
 1. Copy `custom_components/shadeauto/` into your HA `config/custom_components/`.
 2. Restart HA, then add the integration.
 
+### Upgrading from 0.5.x
+Nothing to do. Push updates are on after the upgrade; entity ids, unique ids, devices and your options are kept. To go back to polling only, turn off **Use the hub's change notifications (push updates)** in the options.
+
 ### Upgrading from 0.4.x
+Everything under 0.5.x applies, and also:
 - Home Assistant **2025.8** or newer is enough now (0.4.0 needed 2026.10).
 - Entity ids and unique ids of existing entities are unchanged.
 - **Shades without vanes lose their tilt controls.** 0.4.x showed tilt on every shade unless *Expose vane tilt* was off; now only PerfectSheer shades have it. Remove tilt actions aimed at other shades from automations and scripts, or they will fail. Your old *Expose vane tilt* setting becomes **Vane tilt**: on is Automatic, off is Off.
@@ -113,7 +128,7 @@ Then
 - A stored verify delay below 30 s is raised to 30 s.
 
 ### Upgrading from 0.3.x
-Everything under 0.4.x applies, and also: shades that were still called "Shade <id>" take their name from the ShadeAuto app (renames you made in Home Assistant are kept). Devices that 0.3.x registered under the hub's IP address are moved to the hub's `ThingName` identity on the first start, so they keep their areas and names and survive a later address change. The *Notification timeout* option is gone (see [Limitations](#limitations)). The verify delay now has a minimum of 30 s.
+Everything under 0.4.x applies, and also: shades that were still called "Shade <id>" take their name from the ShadeAuto app (renames you made in Home Assistant are kept). Devices that 0.3.x registered under the hub's IP address are moved to the hub's `ThingName` identity on the first start, so they keep their areas and names and survive a later address change. The *Notification timeout* option is gone; push updates replace 0.3.x's notification watcher, which never showed an event (see [How updates reach Home Assistant](#how-updates-reach-home-assistant)). The verify delay now has a minimum of 30 s.
 
 ## Example use
 
@@ -184,6 +199,7 @@ actions:
   python3 tools/hubwatch.py --host HUB_IP --names
   ```
   It prints a line for every position or target change. Add `--notify` to also print the events the hub pushes on its notification stream. `tools/hubwatch.py --help` lists the other modes (sending a single command, dumping raw status).
+- **Moves from the app show only after up to 30 s?** Then the integration is not getting the hub's notifications. Check that **Use the hub's change notifications (push updates)** is on in the options. A stream that drops after working for at least a minute logs one warning, "Lost the change notifications from the ShadeAuto hub at ...", and an info line, "Change notifications from the ShadeAuto hub at ... are back", once a reopened stream has stayed up for a minute; for every attempt in between, and for a stream that never opened at all, turn on debug logging (below) and look for messages about the notification stream. `python3 tools/hubwatch.py --host HUB_IP --names --notify` (above) shows whether the hub sends events at all. Everything keeps working meanwhile, at polling speed.
 - **Logs** (add to `configuration.yaml`):
   ```yaml
   logger:
@@ -193,8 +209,9 @@ actions:
 
 ## Limitations
 - The hub reports positions only when a move has **finished** (typically 10–35 s after the command), never while moving. The slider animation bridges that gap for lifts; vane changes appear when the hub reports them.
-- The integration **polls** the hub. The hub also pushes a notification when a shade's target or position changes, but the integration does not use that yet; push updates, and asking a single shade to report its position before re-sending a command, are planned for 0.6.0. (Versions up to 0.4.x said the hub never sends notifications. That was a mistake in how our client read the hub's reply, not a hub limitation; `docs/HUB_PROTOCOL.md` section 2.5 explains it.)
-- Moves made with a **physical remote** are reported by the hub only sometimes; moves from the ShadeAuto app are always reported. Home Assistant can only show what the hub knows.
+- Moves made with a **physical remote** still depend on the shade reporting to the hub, and the hub learns of them only sometimes; moves from the ShadeAuto app are always reported. When the hub does learn of a remote move, push updates show it at once; when it does not, Home Assistant can only show what the hub knows. Push updates change how quickly Home Assistant hears what the hub knows, not what the hub knows.
+- **No hub-wide report-ins.** The hub can ask every shade at once to report its position, which might correct positions it lost track of. The integration deliberately never does that: in [kedube/ha-norman](https://github.com/kedube/ha-norman) issue #5 a hub-wide report-in closed a user's roller shades with no move command sent. It only ever asks one shade at a time, and only before re-sending a command to that shade.
+- A shade renamed in the ShadeAuto app keeps its old name in Home Assistant until the integration is reloaded or Home Assistant restarts. The hub announces renames, but this release only re-reads positions when it does.
 - Vanes can be tilted only while the shade is fully lowered (a hub rule, see above).
 - Only PerfectSheer shades have been tested on real hardware. Two-rail and single-rail support follows other projects' findings (see [Supported shade types](#supported-shade-types)); SmartDrape vanes and shutter louvres are not supported.
 - `stop_cover_tilt` is exposed, but stopping a shade in the middle of a vane-only move has not been tested separately. It is the same motor and the same stop command as `stop_cover`; what the hub reports for the vanes afterwards is unknown.

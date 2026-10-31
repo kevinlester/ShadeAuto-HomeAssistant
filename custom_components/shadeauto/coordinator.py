@@ -1,4 +1,4 @@
-"""Polling coordinator: fetches hub status and tracks commanded moves.
+"""Coordinator: fetches hub status and tracks commanded moves.
 
 The hub is the source of truth. It reports two axes per shade, the bottom
 rail and the middle rail (vane tilt on sheer shades, the second rail on
@@ -21,16 +21,24 @@ command and the verify delay both run from ``command_sent``, not from
 registration. While any tracked axis is *unsettled* (our command pending, or
 the hub's target away from its actual) the coordinator polls ``/status`` every
 ``motion_poll_sec`` instead of ``poll_seconds``: the hub publishes only end
-states, the integration does not read its ``/notification`` event stream yet
-(docs/HUB_PROTOCOL.md 2.5), and after a stop the hub reports where the shade
-ended only some 35 s later. ``verify_delay_sec`` after the post it checks once
-that the shade reached its target on every axis the command set, retrying the
-command a single time if it did not and if nobody else has re-commanded the
-shade in the meantime.
+states, and after a stop the hub reports where the shade ended only some 35 s
+later. When push updates are on, ``push.NotificationListener`` reads the hub's
+``/notification`` stream (docs/HUB_PROTOCOL.md 2.5) and requests a refresh
+for every change it announces; polling stays exactly as it is, as the
+fallback, because the stream does not replay what it missed while it was
+down. ``verify_delay_sec`` after the post the coordinator checks once that the
+shade reached its target on every axis the command set. If it did not, and
+nobody else has re-commanded the shade in the meantime, it first asks that
+one shade to report in (``StatusRequest``), because the hub's position may
+just be stale, and re-sends the command a single time only if the report
+still shows the shade short of its target.
 """
 
 from __future__ import annotations
 
+import asyncio
+from collections.abc import Coroutine, Iterable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 import logging
@@ -39,6 +47,7 @@ from typing import Any
 
 from homeassistant.config_entries import ConfigEntry, ConfigEntryState
 from homeassistant.core import CALLBACK_TYPE, HomeAssistant, callback
+from homeassistant.helpers.debounce import Debouncer
 from homeassistant.helpers.event import async_call_later
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
@@ -63,11 +72,37 @@ from .const import (
     PROFILE_BY_MODULE,
     PROFILE_BY_MODULE_TYPE,
     PROFILE_LEGACY,
+    REFRESH_COOLDOWN_SEC,
+    STATUS_REPORT_WAIT_SEC,
 )
 from .options import ShadeAutoOptions
 from .util import to_int
 
 _LOGGER = logging.getLogger(__name__)
+
+
+async def async_wait(hass: HomeAssistant, seconds: float, until: asyncio.Future[None] | None = None) -> None:
+    """Wait ``seconds``, or less if ``until`` completes first.
+
+    The wait is an ``async_call_later`` timer rather than ``asyncio.sleep`` or
+    ``asyncio.timeout``: under the test harness's frozen clock those never
+    return, while a timer fires when a test advances time
+    (docs/ARCHITECTURE.md, Testing notes). Cancelling the caller cancels the
+    timer too.
+    """
+    waiter: asyncio.Future[None] = until if until is not None else hass.loop.create_future()
+
+    @callback
+    def _expire(_now: datetime) -> None:
+        if not waiter.done():
+            waiter.set_result(None)
+
+    cancel = async_call_later(hass, seconds, _expire)
+    try:
+        await waiter
+    finally:
+        cancel()
+
 
 # Fields copied from each /status record into the coordinator's data. The
 # module fields fill in a profile when /GetAllPeripheral lacks them; the
@@ -162,23 +197,40 @@ class ShadeAutoCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     config_entry: ConfigEntry
 
     def __init__(self, hass: HomeAssistant, entry: ConfigEntry, api: ShadeAutoApi, options: ShadeAutoOptions) -> None:
+        # The push listener's refresh requests go through this (async_hub_changed);
+        # see REFRESH_COOLDOWN_SEC. The coordinator sets the debouncer's function itself.
+        debouncer: Debouncer[Coroutine[Any, Any, None]] = Debouncer(
+            hass, _LOGGER, cooldown=REFRESH_COOLDOWN_SEC, immediate=True
+        )
         super().__init__(
             hass,
             _LOGGER,
             config_entry=entry,
             name=f"{DOMAIN} {api.host}",
             update_interval=timedelta(seconds=options.poll_seconds),
+            request_refresh_debouncer=debouncer,
         )
         self.api = api
         self.options = options
+        self._refresh_debouncer = debouncer
+        # The change stream announced something that no /status read started since
+        # then has covered; see async_hub_changed.
+        self._change_unread = False
+        self._cancel_reread: CALLBACK_TYPE | None = None
+        self._shut_down = False  # a read that ends after unload must not schedule another
         # Assigned by async_setup_entry in the package __init__.py once the hub device exists.
         self.hub_device_id: str | None = None
+        # True while push.NotificationListener holds a stream the hub has acknowledged;
+        # for diagnostics and tests only.
+        self.push_connected = False
         self.peripherals: dict[str, Peripheral] = {}
         self._profiles_final = False  # set once the first /status has completed the module pairs
         self._shades: dict[str, ShadeState] = {}
         self._cmd_seq = 0
         self._idle_interval = timedelta(seconds=options.poll_seconds)
         self._motion_interval = timedelta(seconds=options.motion_poll_sec)
+        # Verifies waiting for a shade to report in, by uid; see async_shades_reported.
+        self._report_waiters: dict[str, set[asyncio.Future[None]]] = {}
 
     # --- lookups used by entities -------------------------------------------
 
@@ -342,13 +394,20 @@ class ShadeAutoCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     async def async_shutdown(self) -> None:
         for shade in self._shades.values():
             self._cancel_verify(shade)
+        self._shut_down = True
+        if self._cancel_reread is not None:
+            self._cancel_reread()
+            self._cancel_reread = None
         await super().async_shutdown()
 
     async def _async_update_data(self) -> dict[str, Any]:
+        self._change_unread = False  # this read covers every change announced so far
         try:
             status = await self.api.status()
         except ShadeAutoError as err:
             raise UpdateFailed(f"status error: {err}") from err
+        finally:
+            self._reread_if_changed()
         if not self._profiles_final:
             self._finalise_profiles(status)
         data = {"status": self._build_status_by_uid(status)}
@@ -393,6 +452,67 @@ class ShadeAutoCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if self.update_interval != wanted:
             _LOGGER.debug("Poll interval -> %ss", wanted.total_seconds())
             self.update_interval = wanted
+
+    # --- push -----------------------------------------------------------------
+
+    @callback
+    def async_hub_changed(self) -> None:
+        """Read ``/status`` soon: the change stream announced a change, or was just (re)opened.
+
+        Called by ``push.NotificationListener``. The request goes through the
+        refresh debouncer (``REFRESH_COOLDOWN_SEC``) and is not awaited, so
+        the listener closing a stream cannot cancel the read. A change
+        announced while a read is in flight may have come after the hub
+        answered that read; :meth:`_reread_if_changed` then makes sure one
+        more read follows within ``REFRESH_COOLDOWN_SEC`` of it ending, which
+        the debouncer alone does not do on every supported Home Assistant
+        release (2025.8 drops a request made while its read runs).
+        """
+        self._change_unread = True
+        self._refresh_debouncer.async_schedule_call()
+
+    def _reread_if_changed(self) -> None:
+        """After a ``/status`` read: if a change was announced while it was in flight, read again after the cooldown."""
+        if self._shut_down or not self._change_unread or self._cancel_reread is not None:
+            return
+
+        @callback
+        def _reread(_now: datetime) -> None:
+            self._cancel_reread = None
+            if self._change_unread:  # nothing has read /status since
+                self._refresh_debouncer.async_schedule_call()
+
+        self._cancel_reread = async_call_later(self.hass, REFRESH_COOLDOWN_SEC, _reread)
+
+    @callback
+    def async_shades_reported(self, uids: Iterable[str]) -> None:
+        """Note that the hub's change stream named ``uids``; wakes the verifies waiting for them to report in.
+
+        Called by ``push.NotificationListener`` before it requests the refresh
+        that reads what changed.
+        """
+        for uid in uids:
+            for waiter in self._report_waiters.get(str(uid), ()):
+                if not waiter.done():
+                    waiter.set_result(None)
+
+    @contextmanager
+    def _report_watch(self, uid: str) -> Iterator[asyncio.Future[None]]:
+        """A future that completes when the change stream next names ``uid``.
+
+        Set up before the ``StatusRequest`` is sent, so an event that arrives
+        while the request is still being answered is not missed. Without the
+        stream nothing completes it, and the caller's wait simply runs out.
+        """
+        waiter: asyncio.Future[None] = self.hass.loop.create_future()
+        waiters = self._report_waiters.setdefault(uid, set())
+        waiters.add(waiter)
+        try:
+            yield waiter
+        finally:
+            waiters.discard(waiter)
+            if not waiters:
+                self._report_waiters.pop(uid, None)
 
     # --- commands -------------------------------------------------------------
 
@@ -508,36 +628,92 @@ class ShadeAutoCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             shade.cancel_verify()
             shade.cancel_verify = None
 
+    def _needs_retry(
+        self, uid: str, wanted: dict[str, int], *, targets_asked: dict[str, int | None] | None = None
+    ) -> bool:
+        """Whether a command that set ``wanted`` (axis -> target) should be sent again.
+
+        No if the hub reports the shade there on every axis, or if the hub's
+        target on one of those axes has moved away from ours after once
+        reflecting it (the app or a remote re-commanded the shade, or the hub
+        rewrote the target itself, and fighting that would be wrong). A target
+        the hub never reflected means the command was lost, which is exactly
+        what the retry is for.
+
+        ``targets_asked`` is the hub's target per axis when the shade was asked
+        to report in. kedube/ha-norman reports that a report-in sets the hub's
+        target to the shade's position (docs/HUB_PROTOCOL.md 4.6), so a target
+        that was ours then and now equals the position just reported is that
+        rewrite, not someone else's command: the shade is still short of ours,
+        and the command is re-sent, as 0.5.0 did without the report-in.
+        """
+        shade = self._shade(uid)
+        # An axis the hub does not report (actual None) cannot fail to arrive.
+        if all(shade.axes[axis].actual is None or shade.axes[axis].at(value) for axis, value in wanted.items()):
+            return False
+        for axis, value in wanted.items():
+            state = shade.axes[axis]
+            if not state.reflected or state.target is None or state.target == value:
+                continue
+            if targets_asked is not None and targets_asked.get(axis) == value and state.target == state.actual:
+                _LOGGER.debug(
+                    "UID %s %s: the report-in set the hub's target to the position %s; still retrying",
+                    uid,
+                    axis,
+                    state.target,
+                )
+                continue
+            _LOGGER.debug("UID %s %s: target changed to %s by someone else; not retrying", uid, axis, state.target)
+            return False
+        return True
+
     async def async_verify_and_retry(self, uid: str, *, bottom: int, middle: int | None, cmd_id: int) -> None:
         """Resend the command once if the shade is not where we asked.
 
         Runs ``verify_delay_sec`` after a command's post was answered and
         checks the axes the command set (``middle=None``: the bottom rail
-        only). Does nothing if a newer command was issued for the shade, or if
-        the hub's target on one of those axes has moved away from ours after
-        once reflecting it (the app or a remote re-commanded the shade, and
-        fighting them would be wrong). A target the hub never reflected means
-        the command was lost, which is exactly what the retry is for.
+        only) with :meth:`_needs_retry`. Before re-sending, it asks that one
+        shade to report in (``StatusRequest``, never more than one per verify)
+        and waits until the change stream names the shade or
+        ``STATUS_REPORT_WAIT_SEC`` passes, then reads ``/status`` and decides
+        again by the same rules: the hub's position may only have been stale.
+        A target the report-in itself set to the shade's position does not
+        count as someone else's command (``targets_asked`` in
+        :meth:`_needs_retry`). A failed ``StatusRequest`` leaves the first
+        decision standing. Does
+        nothing once a newer command, a stop or an unload has superseded the
+        command, which is checked after every wait.
         """
         uid = str(uid)
         shade = self._shade(uid)
         if shade.cmd_id != cmd_id or shade.retry_attempted:
             return
         await self.async_refresh()
-        if shade.cmd_id != cmd_id:
-            return
-
         wanted = {AXIS_BOTTOM: int(bottom)}
         if middle is not None:
             wanted[AXIS_MIDDLE] = int(middle)
-        # An axis the hub does not report (actual None) cannot fail to arrive.
-        if all(shade.axes[axis].actual is None or shade.axes[axis].at(value) for axis, value in wanted.items()):
+        if shade.cmd_id != cmd_id or not self._needs_retry(uid, wanted):
             return
-        for axis, value in wanted.items():
-            state = shade.axes[axis]
-            if state.reflected and state.target is not None and state.target != value:
-                _LOGGER.debug("UID %s %s: target changed to %s by someone else; not retrying", uid, axis, state.target)
-                return
+
+        # The hub can miss a shade's end-of-move report and keep an old
+        # position (docs/HUB_PROTOCOL.md 4.6); ask the shade itself first.
+        targets_asked = {axis: shade.axes[axis].target for axis in wanted}
+        with self._report_watch(uid) as reported:
+            try:
+                await self.api.request_status(uid)
+            except ShadeAutoError as err:
+                _LOGGER.debug("UID %s: status request failed (%s); deciding on the last status", uid, err)
+            else:
+                if shade.cmd_id != cmd_id:
+                    return
+                await async_wait(self.hass, STATUS_REPORT_WAIT_SEC, until=reported)
+                if shade.cmd_id != cmd_id:
+                    return
+                await self.async_refresh()
+                if shade.cmd_id != cmd_id or not self._needs_retry(uid, wanted, targets_asked=targets_asked):
+                    return
+        if shade.cmd_id != cmd_id:
+            return  # superseded while a failed status request waited for its send slot
 
         _LOGGER.debug(
             "UID %s not at bottom=%s middle=%s (hub reports %s/%s); retrying once",

@@ -5,6 +5,73 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+- A cover reads as idle at its estimated target once the estimated travel
+  time has elapsed, as 0.3.0 did, instead of staying "opening" or "closing"
+  until the hub hears from the shade (10-35 s after it stops, longer on some
+  shades). The hub's report still corrects the position when it arrives.
+  Only the opening/closing state changed; the slider already behaved this way.
+- Push updates (`push_enabled`) are off by default. The stream has been
+  observed for minutes on one hub so far and holds a connection to the hub
+  open for as long as the integration runs, so it is opt-in until it has
+  more hours on real hubs. Nothing else about it changed.
+
+## [0.6.0] - 2026-10-24
+
+### Added
+- Push updates. The integration holds the hub's `/notification` stream open
+  and reads `/status` as soon as the hub announces a change, with a 1 s
+  debounce so a burst of events costs one or two reads. A shade shows as
+  opening or closing as soon as the hub takes a command, including one from
+  the ShadeAuto app (it used to take up to the 30 s idle poll), and its new
+  position appears as soon as the shade reports where it stopped. The
+  stream is reopened every 300 s, because long-lived streams have been seen
+  to go quiet, and after any disconnect, waiting 5 s and twice as long after
+  each further failure in a row, up to 60 s. A stream counts as working
+  again only once it has stayed open for 60 s, so a hub that closes every
+  stream at once costs a reconnect a minute and one warning, not a warning
+  every 5 s; an answer other than the hub's `{"Error": "Success."}` counts
+  as a refusal. Every reconnect is followed by a `/status` read, because the
+  hub does not replay events missed while the stream was down. The listener
+  never waits for the reads it asks for, so closing a stream cannot cancel
+  one (on Home Assistant 2026.10 that would have shown the covers as
+  unavailable), and a change announced while a read is in flight is read
+  again within a second on every supported Home Assistant release.
+  Polling continues unchanged as the fallback (README, "How updates reach
+  Home Assistant"; `docs/ARCHITECTURE.md`, "Push updates";
+  `docs/HUB_PROTOCOL.md` 2.5).
+- Option "Use the hub's change notifications (push updates)"
+  (`push_enabled`, default on). Off never opens the stream: updates come
+  from polling alone, as in 0.5.0. Verify's per-shade report-in request
+  (below) does not depend on it; turning verify off stops that.
+- Tests: `FakeHub` serves `/notification` as a stream that tests write events
+  to and can drop, to cover the listener's framing, reconnects and recycling,
+  and answers `StatusRequest: 0` the way the hub does. The verify tests now
+  expect the `StatusRequest` before the one retry, and the shared test
+  options turn push updates off so the tests from before 0.6.0 keep their
+  meaning.
+
+### Changed
+- Verify and retry: before re-sending a command, the integration asks that
+  one shade to report in (`{"PeripheralUID": <uid>, "StatusRequest": 0}`)
+  and waits up to 10 s for its report (the full 10 s when push updates are
+  off or the stream is down), then reads `/status` and re-sends only if the
+  same checks as before still call for it. A shade that got there but had
+  not told the hub yet is no longer sent the command twice. A hub target that
+  the report-in set to the shade's position, as kedube/ha-norman reports
+  hubs do, does not count as someone else's command, so a command the hub
+  stored but the shade never carried out is still re-sent, as in 0.5.0. The
+  request can reach a shade that is still moving when the verify delay is
+  shorter than its travel. The integration never sends a hub-wide
+  report-in: kedube/ha-norman issue #5 saw one close a user's roller shades
+  (`docs/HUB_PROTOCOL.md` 4.6).
+- The manifest's `iot_class` is `local_push` (was `local_polling`).
+- Documentation: `docs/HUB_PROTOCOL.md` 2.5 and 4.6 and the `StatusRequest`
+  rows describe what the integration now does with the stream and with
+  `StatusRequest`; `docs/ARCHITECTURE.md` describes the listener's
+  lifecycle, the refresh debounce, the verify sequence and how tests drive
+  the stream.
+
 ## [0.5.0] - 2026-10-23
 
 ### Added

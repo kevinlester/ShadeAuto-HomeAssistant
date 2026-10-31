@@ -24,6 +24,7 @@ def test_defaults() -> None:
     assert options.collision_guard is True
     assert options.rail_min_gap == 0
     assert options.verify_delay_sec == 60
+    assert options.push_enabled is False  # opt-in: off means 0.5.0's polling only
     # kedube/ha-norman measured drops at 1.0-1.2 s between commands.
     assert options.send_spacing_sec == 1.5
 
@@ -69,6 +70,11 @@ def test_verify_delay_below_the_form_minimum_is_raised_to_it(stored: float, expe
 @pytest.mark.parametrize(("stored", "expected"), [(-5, 0), (0, 0), (10.0, 10), (50, 50), (80, 50)])
 def test_rail_gap_is_kept_inside_the_form_range(stored: float, expected: int) -> None:
     assert ShadeAutoOptions.from_mapping({"rail_min_gap": stored}).rail_min_gap == expected
+
+
+@pytest.mark.parametrize(("stored", "expected"), [(True, True), (False, False), (1, True), (0, False)])
+def test_push_enabled(stored: Any, expected: bool) -> None:
+    assert ShadeAutoOptions.from_mapping({"push_enabled": stored}).push_enabled is expected
 
 
 @pytest.mark.parametrize("bad", [None, "fast", [], {}])

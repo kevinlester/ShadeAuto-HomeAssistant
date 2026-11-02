@@ -639,7 +639,7 @@ Neither client could ever have shown an event.
 
 **What the integration uses it for.** Push updates, since 0.6.0. With the
 option "Use the hub's change notifications (push updates)" (`push_enabled`,
-on by default) the integration holds one stream per hub open for as long as
+off by default) the integration holds one stream per hub open for as long as
 the config entry is loaded (`docs/ARCHITECTURE.md`, "Push updates"):
 
 - It reads the reply as it arrives and splits the bytes into objects itself

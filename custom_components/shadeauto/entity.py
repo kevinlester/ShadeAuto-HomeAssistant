@@ -13,6 +13,8 @@ from .coordinator import Peripheral, ShadeAutoCoordinator
 
 # Module type/detail pairs the hub reports for shade families we recognise.
 KNOWN_MODELS = {(48, 3): "PerfectSheer"}
+# Module types whose every detail is one product family.
+KNOWN_MODEL_FAMILIES = {80: "SmartDrape"}
 
 
 def model_name(peripheral: Peripheral) -> str:
@@ -22,6 +24,8 @@ def model_name(peripheral: Peripheral) -> str:
         return KNOWN_MODELS[key]
     if peripheral.module_type is None:
         return "Shade"
+    if (family := KNOWN_MODEL_FAMILIES.get(peripheral.module_type)) is not None:
+        return f"{family} (type {peripheral.module_type}/{peripheral.module_detail})"
     return f"Shade (type {peripheral.module_type}/{peripheral.module_detail})"
 
 

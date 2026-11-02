@@ -343,7 +343,8 @@ profile is fixed after that, because the entities are built from it.
 | `sheer` | 48/3, 49/3 (PerfectSheer) | one cover with lift and tilt (tilt unless `tilt_mode` is `off`) | `bottom`, `middle` | always `(bottom, middle)`; [PerfectSheer](#perfectsheer-sheer) |
 | `single_rail` | every other detail of 32, 48 and 49: 32/0, 32/2 (cellular), 48/1, 49/1 (roller), 48/2, 49/2 (roman) | one cover, lift only | `bottom` | `bottom` alone, as in 0.3.0; [Single-rail and legacy](#single-rail-and-legacy) |
 | `two_rail` | 33/any, 32/3, 32/4, 32/5 (day/night, top-down/bottom-up) | the cover for the bottom rail, plus a "Top" cover for the upper rail | `bottom`, `middle` | always both rails, collision guard; [Two-rail](#two-rail-commands-and-the-collision-guard) |
-| `legacy` | 80/any (SmartDrape), 1/any (shutter), 32/48/49 without a `ModuleDetail`, anything unrecognised | one cover, lift only | `bottom` | as `single_rail` |
+| `drape` | 80/any (SmartDrape) | one cover with the draw and vane tilt on the hub's scale (tilt unless `tilt_mode` is `off`) | `bottom` | always `(bottom, middle)`: a draw restates the vanes the hub last reported, a tilt restates where the draw is heading; nothing is lowered first |
+| `legacy` | 1/any (shutter), 32/48/49 without a `ModuleDetail`, anything unrecognised | one cover, lift only | `bottom` | as `single_rail` |
 
 Why each profile is the way it is:
 
@@ -359,9 +360,18 @@ Why each profile is the way it is:
 - **`two_rail`** is ported from upstream PR #9, which was tested on one real
   type 33 shade. A bottom-only payload would set the upper rail's target to 0
   and pull it down, so both rails go in every command.
+- **`drape`** is upstream PR #7 as a profile. That PR drove the same two
+  fields and its thread reports tilt working on three SmartDrapes; this project
+  has not run one. The vane axis is deliberately not tracked: PR #7 saw the
+  motor reset the vanes to about 17 during every draw, and what the hub does
+  with the vane target then is unknown, so a tracked vane axis could keep the
+  drape "moving" until the failsafe and make verify re-send every draw. The
+  cover reads `current_tilt_position` from the raw status record instead, and
+  `register_command` drops the vane value from the pending targets of any
+  profile that does not track that axis (`_tracked_middle`).
 - **`legacy`** is for families with no verified behaviour in this codebase.
   It does the least that can go wrong: lift only, the 0.3.0 payload.
-  SmartDrapes and shutters (`KNOWN_UNSUPPORTED_MODULE_TYPES`) get it quietly;
+  Shutters (`KNOWN_UNSUPPORTED_MODULE_TYPES`) get it quietly;
   a pair that is not in the tables at all also logs a warning asking the user
   to report its type, so the tables can grow from real reports.
 

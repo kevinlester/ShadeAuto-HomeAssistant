@@ -6,7 +6,11 @@
   that sends bottom-only commands, as 0.3.0 did;
 * **two_rail** (top-down/bottom-up, day/night): two covers on one device, the
   main one for the bottom rail and a "Top" one for the middle rail. Both
-  rails are heights on the same axis, 0 lowered to 100 raised.
+  rails are heights on the same axis, 0 lowered to 100 raised;
+* **drape** (SmartDrape): one cover, the draw on the bottom rail and vane
+  tilt on the middle rail, on the hub's own scale (0 and 100 closed, 50
+  open). Every command carries both fields, restating the one it does not
+  change; only the draw is tracked (see ``PROFILE_AXES`` in ``const.py``).
 
 Positions come from the hub. Because the hub reports only end states, a
 cover interpolates its position slider during a move ("estimation") from the
@@ -49,9 +53,13 @@ from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
 from .api import ShadeAutoError, clamp_position
 from .const import (
+    ATTR_MIDDLE_RAIL,
     AXIS_BOTTOM,
     AXIS_MIDDLE,
     DOMAIN,
+    DRAPE_TILT_CLOSED,
+    DRAPE_TILT_OPEN,
+    PROFILE_DRAPE,
     PROFILE_SHEER,
     PROFILE_TWO_RAIL,
     TILT_MODE_AUTO,
@@ -59,6 +67,7 @@ from .const import (
 )
 from .coordinator import ShadeAutoCoordinator
 from .entity import ShadeAutoEntity
+from .util import to_int
 
 if TYPE_CHECKING:
     from . import ShadeAutoConfigEntry
@@ -147,6 +156,8 @@ def _covers_for(coordinator: ShadeAutoCoordinator, uid: str) -> list[ShadeAutoCo
         return [SheerCover(coordinator, uid)]
     if profile == PROFILE_TWO_RAIL:
         return [TwoRailBottomCover(coordinator, uid), TwoRailTopCover(coordinator, uid)]
+    if profile == PROFILE_DRAPE:
+        return [DrapeCover(coordinator, uid)]
     return [LiftCover(coordinator, uid)]
 
 
@@ -419,6 +430,85 @@ class SheerCover(ShadeAutoCover):
 
     async def async_close_cover_tilt(self, **kwargs: Any) -> None:
         await self._async_command(bottom=0, middle=0)
+
+    async def async_stop_cover_tilt(self, **kwargs: Any) -> None:
+        await self._async_stop()
+
+
+class DrapeCover(ShadeAutoCover):
+    """A SmartDrape: the draw on the bottom rail plus vane tilt on the middle rail, unless tilt mode is off.
+
+    What upstream PR #7 did, which its thread reports working on three
+    SmartDrapes, expressed as a profile:
+
+    * the tilt is the hub's own value, not re-mapped: 0 and 100 are closed in
+      opposite directions and 50 is open, so ``open_cover_tilt`` sends 50 and
+      ``close_cover_tilt`` sends 0;
+    * every draw command restates the vanes where the hub last reported them,
+      because a bottom-only command makes the hub set the vane target to 0
+      (closed); every tilt command restates the draw where it is heading;
+    * nothing is lowered first: that rule belongs to PerfectSheer shades.
+
+    Only the draw is tracked (``PROFILE_AXES``): the motor resets the vanes
+    while the drape moves (PR #7), so the vane axis is left out of motion and
+    verify, and ``current_tilt_position`` is read straight from the hub's
+    last ``/status`` record. With tilt mode off the commands are the same;
+    only the tilt features and the attribute go away.
+    """
+
+    _attr_name = None  # the main entity carries the device name
+
+    def __init__(self, coordinator: ShadeAutoCoordinator, uid: str) -> None:
+        super().__init__(coordinator, uid)
+        self._has_tilt = coordinator.options.tilt_mode == TILT_MODE_AUTO
+        self._attr_supported_features = LIFT_FEATURES | (TILT_FEATURES if self._has_tilt else CoverEntityFeature(0))
+
+    def _reported_vanes(self) -> int | None:
+        """The vane position in the hub's last status record (the axis is not tracked by the coordinator)."""
+        return to_int(self.coordinator.status_for(self._uid).get(ATTR_MIDDLE_RAIL))
+
+    @property
+    def current_cover_tilt_position(self) -> int | None:
+        if not self._has_tilt:
+            return None
+        return self._reported_vanes()
+
+    async def _async_draw(self, bottom: int) -> None:
+        """Move the drape, keeping the vanes where the hub says they are."""
+        vanes = self._reported_vanes()
+        if vanes is None:
+            # The hub reports no vane position for this drape: the 0.3.0
+            # payload, which the hub treats as vanes 0, is all that can be sent.
+            _LOGGER.debug("UID %s: no vane position reported; sending the draw alone", self._uid)
+        await self._async_send(bottom=clamp_position(bottom), middle=vanes)
+
+    async def _async_tilt(self, middle: int) -> None:
+        """Set the vanes, keeping the drape where it is heading."""
+        bottom = self.coordinator.get_held_position(self._uid, AXIS_BOTTOM)
+        if bottom is None:
+            raise HomeAssistantError(
+                f"Could not tilt shade {self.shade_name}: the hub has not reported how far it is drawn, "
+                "and every command has to say where to hold it"
+            )
+        await self._async_send(bottom=bottom, middle=clamp_position(middle))
+
+    async def async_set_cover_position(self, **kwargs: Any) -> None:
+        await self._async_draw(kwargs[ATTR_POSITION])
+
+    async def async_open_cover(self, **kwargs: Any) -> None:
+        await self._async_draw(100)
+
+    async def async_close_cover(self, **kwargs: Any) -> None:
+        await self._async_draw(0)
+
+    async def async_set_cover_tilt_position(self, **kwargs: Any) -> None:
+        await self._async_tilt(kwargs[ATTR_TILT_POSITION])
+
+    async def async_open_cover_tilt(self, **kwargs: Any) -> None:
+        await self._async_tilt(DRAPE_TILT_OPEN)
+
+    async def async_close_cover_tilt(self, **kwargs: Any) -> None:
+        await self._async_tilt(DRAPE_TILT_CLOSED)
 
     async def async_stop_cover_tilt(self, **kwargs: Any) -> None:
         await self._async_stop()

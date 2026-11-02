@@ -144,7 +144,15 @@ AXIS_FIELDS = {
 PROFILE_SHEER = "sheer"  # bottom rail = lift, middle rail = vane tilt honoured only at bottom 0
 PROFILE_SINGLE_RAIL = "single_rail"  # bottom rail only; the middle rail always reads 0
 PROFILE_TWO_RAIL = "two_rail"  # two independent rail heights (top-down/bottom-up, day/night)
+PROFILE_DRAPE = "drape"  # bottom rail = how far the drape is drawn, middle rail = vane tilt on the hub's scale
 PROFILE_LEGACY = "legacy"  # no verified behaviour; handled like single_rail, as 0.3.0 did
+
+# A SmartDrape's vanes on the hub's scale: 0 and 100 are closed in opposite
+# directions, 50 is open (kedube/ha-norman "Cover types"; upstream PR #7, whose
+# tilt was tested on three SmartDrapes). Exposed to Home Assistant as they are,
+# so open_cover_tilt sends 50 and close_cover_tilt sends 0.
+DRAPE_TILT_OPEN = 50
+DRAPE_TILT_CLOSED = 0
 
 # Exact pairs, checked before PROFILE_BY_MODULE_TYPE.
 PROFILE_BY_MODULE: dict[tuple[int, int], str] = {
@@ -174,21 +182,33 @@ PROFILE_BY_MODULE_TYPE: dict[int, str] = {
     # height on the same 0-100 axis as the bottom rail (upstream PR #9, on one
     # real type-33 shade of unreported detail; kedube on 33/3).
     33: PROFILE_TWO_RAIL,
+    # SmartDrape: the bottom rail is how far the drape is drawn and the middle
+    # rail is the vanes, in seven stops on the hub's 0-100 scale (kedube, "Cover
+    # types", from one user's 80/1). Upstream PR #7 drove exactly that pair of
+    # fields and was tested on three SmartDrapes (its thread). Not yet tested
+    # by this project; the drape profile is what PR #7 did, on top of 0.6.0.
+    80: PROFILE_DRAPE,
 }
 # Families the vendor app knows that have no verified behaviour here
-# (SmartDrape: vanes in seven stops; Shutter: louvers as Position 0-7, no rails;
-# kedube, "Cover types"). They get the legacy profile without a warning.
-KNOWN_UNSUPPORTED_MODULE_TYPES: dict[int, str] = {1: "Shutter", 80: "SmartDrape"}
+# (Shutter: louvers as Position 0-7, no rails; kedube, "Cover types"). They get
+# the legacy profile without a warning.
+KNOWN_UNSUPPORTED_MODULE_TYPES: dict[int, str] = {1: "Shutter"}
 # The Top cover of a two-rail shade is the main cover's unique id plus this:
 # upstream PR #9 (alexfgoldberg's fork) used it, so its users keep the entity.
 TOP_COVER_UNIQUE_ID_SUFFIX = "_middle"
 # Axes the coordinator tracks (pending targets, motion, fast polling, verify).
 # Single-rail and legacy shades track the bottom rail only, so a middle target
-# the hub never reaches (the stuck 100 above) cannot keep them "moving".
+# the hub never reaches (the stuck 100 above) cannot keep them "moving". A
+# drape tracks the bottom rail only as well: PR #7 found the motor resets the
+# vanes to about 17 whenever the drape moves, and what the hub does with the
+# vane *target* then is unknown, so a tracked vane axis could keep the drape
+# "moving" until the failsafe and make verify re-send every draw. The tilt
+# attribute still follows what the hub reports.
 PROFILE_AXES: dict[str, tuple[str, ...]] = {
     PROFILE_SHEER: AXES,
     PROFILE_TWO_RAIL: AXES,
     PROFILE_SINGLE_RAIL: (AXIS_BOTTOM,),
+    PROFILE_DRAPE: (AXIS_BOTTOM,),
     PROFILE_LEGACY: (AXIS_BOTTOM,),
 }
 

@@ -742,7 +742,7 @@ you own one of those shades, the notes below say what to check.
 | 32, 48, 49 with any other detail | Not known | Assumed as the rest of the family | None | `single_rail`, no warning |
 | 33/x | Cellular shade with two rails: day/night or top-down/bottom-up | The upper rail's height, on the same axis as the bottom rail | kedube: 33/3 on real hardware, 33/4-5 vendor app only; PR #9: one real type 33 shade | `two_rail` |
 | 32/3, 32/4, 32/5 | Cellular shade, top-down/bottom-up | As 33 | kedube: vendor app only (the app draws two sliders) | `two_rail` |
-| 80/x | SmartDrape | Vanes in seven stops, open at 50, closed at 0 and 100 | kedube: 80/1 from one user's diagnostics (issue #2); PR #7 matches | `legacy` |
+| 80/x | SmartDrape | Vanes in seven stops, open at 50, closed at 0 and 100 | kedube: 80/1 from one user's diagnostics (issue #2); PR #7 matches, and its thread reports tilt working on three SmartDrapes | `drape` |
 | 1/x | Shutter | No rails; the louvres are a separate `Position` field, 0-7 | kedube: vendor app only | `legacy` |
 | 32, 48, 49 without a `ModuleDetail` | Cannot be told | Unknown | | `legacy`, with a warning in the log |
 | anything else | | Unknown | | `legacy`, with a warning in the log |
@@ -806,11 +806,19 @@ openness in seven stops (0, 17, 33, 50, 66, 83, 100), open at 50 and closed at
 both ends. PR #7 adds tilt for a shade it does not identify, with the same
 shape: 0 and 100 are closed in opposite directions, 50 is open, and the motor
 resets the tilt to about 17 when the drape moves. That matches kedube's
-SmartDrape, but PR #7 gives no `ModuleType`, so the match is an inference.
-0.5.0 gives SmartDrapes the `legacy` profile (lift only, bottom-only commands,
-no tilt), because neither the tilt scale nor what a bottom-only command does to
-the vanes (by 4.3 probably sends them to 0, closed) has been checked with this
-integration.
+SmartDrape, but PR #7 gives no `ModuleType`, so the match is an inference;
+PR #7's thread, though, reports its tilt working on three SmartDrapes (rtm,
+2026-05-11), which is the strongest evidence anyone has. 0.5.0 and 0.6.0 gave
+SmartDrapes the `legacy` profile (lift only, bottom-only commands, no tilt).
+The `drape` profile does what PR #7 did: the vanes are exposed on the hub's
+own scale (50 open, 0 and 100 closed), every draw restates the vane position
+the hub last reported (a bottom-only command would, by 4.3, send them to 0),
+every tilt restates the draw, and nothing is lowered first. Only the draw is
+tracked for motion and verify, because PR #7 saw the motor reset the vanes to
+about 17 during a draw and what the hub does with the vane *target* then is
+not known. **Unverified by this project**: whether the hub coerces the vane
+target during a draw, whether the seven stops are reported as the nearest
+value or as sent, and what a stop does to the vanes.
 
 **Shutter (1/x).** kedube, from the vendor app's library only: no rails; the
 louvres are one `Position` field, 0-7 (7 shut, 3 horizontal), sent alone. The
@@ -818,8 +826,8 @@ louvres are one `Position` field, 0-7 (7 shut, 3 horizontal), sent alone. The
 ignores (**unverified**). Louvre control is not supported.
 
 **Anything else.** `legacy`: lift only, bottom-only commands, and a warning in
-the log asking the user to report the type (SmartDrapes and shutters get the
-same profile without the warning). Other details of types 32, 48 and 49 are
+the log asking the user to report the type (shutters get the same profile
+without the warning). Other details of types 32, 48 and 49 are
 not "anything else": they get `single_rail` without a warning, like the rest
 of their family; only a 32, 48 or 49 reported without a `ModuleDetail` falls
 back to `legacy`, because which product it is cannot be told. The pair comes

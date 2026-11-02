@@ -538,7 +538,7 @@ class ShadeAutoCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         bottom = int(bottom)
         middle = None if middle is None else int(middle)
         shade.command = (bottom, middle)
-        self._set_pending(shade, bottom=bottom, middle=middle, sent=False)
+        self._set_pending(shade, bottom=bottom, middle=self._tracked_middle(uid, middle), sent=False)
         self._cancel_verify(shade)
         self._apply_poll_interval()
         return cmd_id
@@ -608,6 +608,15 @@ class ShadeAutoCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             state.pending = None
         self._cancel_verify(shade)
         self._apply_poll_interval()
+
+    def _tracked_middle(self, uid: str, middle: int | None) -> int | None:
+        """``middle`` if the shade's profile tracks that axis, else ``None``.
+
+        A drape restates its vanes in every command but tracks the draw alone
+        (``PROFILE_AXES``): a pending target on an axis that status never
+        updates would never clear.
+        """
+        return middle if AXIS_MIDDLE in self.axes_for(uid) else None
 
     @staticmethod
     def _set_pending(shade: ShadeState, *, bottom: int, middle: int | None, sent: bool) -> None:
@@ -731,6 +740,6 @@ class ShadeAutoCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             return
         if shade.cmd_id != cmd_id:
             return  # a newer command arrived while the retry was in flight; its bookkeeping wins
-        self._set_pending(shade, bottom=bottom, middle=middle, sent=True)
+        self._set_pending(shade, bottom=bottom, middle=self._tracked_middle(uid, middle), sent=True)
         self._apply_poll_interval()
         await self.async_refresh()

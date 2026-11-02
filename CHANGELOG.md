@@ -3,6 +3,20 @@
 All notable changes to this integration are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Added
+- SmartDrape (ModuleType 80) shades get vane tilt: a new `drape` profile
+  exposes the vanes on the hub's own scale (0 and 100 closed in opposite
+  directions, 50 open; open tilt sends 50, close tilt sends 0), restates the
+  vanes the hub last reported in every draw so the hub does not close them,
+  and restates the draw in every tilt. Nothing is lowered before a tilt. Only
+  the draw is tracked for motion and verify, because the motor resets the
+  vanes during a draw (upstream PR #7, whose tilt this follows and whose
+  thread reports it working on three SmartDrapes). The device model reads
+  "SmartDrape". Not yet tested on a real drape by this project; 0.6.0 drove
+  SmartDrapes as lift-only shades.
+
 ## [0.6.0] - 2026-11-02
 
 ### Added

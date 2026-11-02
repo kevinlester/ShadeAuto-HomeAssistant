@@ -3,20 +3,7 @@
 All notable changes to this integration are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [Unreleased]
-
-### Changed
-- A cover reads as idle at its estimated target once the estimated travel
-  time has elapsed, as 0.3.0 did, instead of staying "opening" or "closing"
-  until the hub hears from the shade (10-35 s after it stops, longer on some
-  shades). The hub's report still corrects the position when it arrives.
-  Only the opening/closing state changed; the slider already behaved this way.
-- Push updates (`push_enabled`) are off by default. The stream has been
-  observed for minutes on one hub so far and holds a connection to the hub
-  open for as long as the integration runs, so it is opt-in until it has
-  more hours on real hubs. Nothing else about it changed.
-
-## [0.6.0] - 2026-10-24
+## [0.6.0] - 2026-11-02
 
 ### Added
 - Push updates. The integration holds the hub's `/notification` stream open
@@ -41,9 +28,12 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   Home Assistant"; `docs/ARCHITECTURE.md`, "Push updates";
   `docs/HUB_PROTOCOL.md` 2.5).
 - Option "Use the hub's change notifications (push updates)"
-  (`push_enabled`, default on). Off never opens the stream: updates come
-  from polling alone, as in 0.5.0. Verify's per-shade report-in request
-  (below) does not depend on it; turning verify off stops that.
+  (`push_enabled`, default off). Off never opens the stream: updates come
+  from polling alone, as in 0.5.0. The stream has been observed for minutes
+  on one hub so far and holds a connection to the hub open for as long as
+  the integration runs, so it is opt-in until it has more hours on real
+  hubs. Verify's per-shade report-in request (below) does not depend on it;
+  turning verify off stops that.
 - Tests: `FakeHub` serves `/notification` as a stream that tests write events
   to and can drop, to cover the listener's framing, reconnects and recycling,
   and answers `StatusRequest: 0` the way the hub does. The verify tests now
@@ -52,6 +42,11 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   meaning.
 
 ### Changed
+- A cover reads as idle at its estimated target once the estimated travel
+  time has elapsed, as 0.3.0 did, instead of staying "opening" or "closing"
+  until the hub hears from the shade (10-35 s after it stops, longer on some
+  shades). The hub's report still corrects the position when it arrives.
+  Only the opening/closing state changed; the slider already behaved this way.
 - Verify and retry: before re-sending a command, the integration asks that
   one shade to report in (`{"PeripheralUID": <uid>, "StatusRequest": 0}`)
   and waits up to 10 s for its report (the full 10 s when push updates are

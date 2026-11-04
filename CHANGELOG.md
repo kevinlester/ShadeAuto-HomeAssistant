@@ -12,10 +12,22 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   vanes the hub last reported in every draw so the hub does not close them,
   and restates the draw in every tilt. Nothing is lowered before a tilt. Only
   the draw is tracked for motion and verify, because the motor resets the
-  vanes during a draw (upstream PR #7, whose tilt this follows and whose
-  thread reports it working on three SmartDrapes). The device model reads
-  "SmartDrape". Not yet tested on a real drape by this project; 0.6.0 drove
-  SmartDrapes as lift-only shades.
+  vanes during a draw (upstream PR #7, whose tilt this follows). The device
+  model reads "SmartDrape". Tested by rtm on three 80/1 drapes (firmware
+  0.2.3): tilt, draw, stop and the vanes kept through a draw all behaved as
+  designed. 0.6.0 drove SmartDrapes as lift-only shades.
+- A **SmartDrapes: vane value the hub reports when the vanes are closed**
+  option. A drape's vanes stop short of the hub's 0 and 100 (17 and 83 on
+  the drapes tested), so close tilt read back as 17. Set to that value, the
+  reachable range is shown and set as 0 to 100: closed reads 0 and 100, open
+  stays 50. Default 0, which keeps the hub's scale as it is.
+
+### Changed
+- A drape's `current_tilt_position` follows a tilt within seconds instead of
+  at the next idle poll. The vane axis is not tracked, so a tilt-only command
+  used to count as settled at the first poll; polling now stays fast for up
+  to 35 s after a command that changes an untracked axis, and stops early as
+  soon as the hub reports the axis anywhere new.
 
 ## [0.6.0] - 2026-11-02
 

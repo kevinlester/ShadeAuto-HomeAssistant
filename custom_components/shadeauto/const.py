@@ -51,6 +51,7 @@ CONF_TILT_MODE = "tilt_mode"
 CONF_COLLISION_GUARD = "collision_guard"
 CONF_RAIL_MIN_GAP = "rail_min_gap"
 CONF_PUSH_ENABLED = "push_enabled"
+CONF_DRAPE_VANE_END_STOP = "drape_vane_end_stop"
 # 0.4.x stored a bool here; it is only read to migrate to CONF_TILT_MODE.
 CONF_TILT_ENABLED = "tilt_enabled"
 
@@ -100,6 +101,14 @@ MAX_RAIL_MIN_GAP = 50  # PR #9's form range
 # STATUS_REPORT_WAIT_SEC). Polling runs either way, because the stream does
 # not replay what it missed while down.
 DEFAULT_PUSH_ENABLED = False  # opt-in until the stream has more hours on real hubs
+# Where a SmartDrape's vanes stop when told to close, on the hub's scale. 0
+# shows the hub's value as it is. Three drapes (ModuleType 80/1, firmware
+# 0.2.3, tested by rtm) sent 0 and 100 land at 17 and 83, so a user who sets
+# this to 17 sees the reachable range 17-83 as tilt 0-100: closing the vanes
+# then reads back as 0, not 17. The mapping is symmetric about 50, so open
+# stays 50 on both scales. At most 49: 50 would leave no range at all.
+DEFAULT_DRAPE_VANE_END_STOP = 0
+MAX_DRAPE_VANE_END_STOP = 49
 
 # --- Hub field names ---------------------------------------------------------
 ATTR_PERIPHERAL_UID = "PeripheralUID"
@@ -149,8 +158,10 @@ PROFILE_LEGACY = "legacy"  # no verified behaviour; handled like single_rail, as
 
 # A SmartDrape's vanes on the hub's scale: 0 and 100 are closed in opposite
 # directions, 50 is open (kedube/ha-norman "Cover types"; upstream PR #7, whose
-# tilt was tested on three SmartDrapes). Exposed to Home Assistant as they are,
-# so open_cover_tilt sends 50 and close_cover_tilt sends 0.
+# tilt was tested on three SmartDrapes). Exposed to Home Assistant on that
+# scale, unless DRAPE_VANE_END_STOP re-maps the reachable range; 50 is open on
+# both, so open_cover_tilt always sends 50 and close_cover_tilt sends the end
+# stop (0 by default).
 DRAPE_TILT_OPEN = 50
 DRAPE_TILT_CLOSED = 0
 
@@ -183,10 +194,11 @@ PROFILE_BY_MODULE_TYPE: dict[int, str] = {
     # real type-33 shade of unreported detail; kedube on 33/3).
     33: PROFILE_TWO_RAIL,
     # SmartDrape: the bottom rail is how far the drape is drawn and the middle
-    # rail is the vanes, in seven stops on the hub's 0-100 scale (kedube, "Cover
+    # rail is the vanes, in stops on the hub's 0-100 scale (kedube, "Cover
     # types", from one user's 80/1). Upstream PR #7 drove exactly that pair of
-    # fields and was tested on three SmartDrapes (its thread). Not yet tested
-    # by this project; the drape profile is what PR #7 did, on top of 0.6.0.
+    # fields; the drape profile is what PR #7 did, on top of 0.6.0, and was
+    # tested by rtm on three 80/1 drapes (firmware 0.2.3): tilt, draw, stop
+    # and the vanes restated through a draw all behaved as designed.
     80: PROFILE_DRAPE,
 }
 # Families the vendor app knows that have no verified behaviour here
@@ -203,7 +215,9 @@ TOP_COVER_UNIQUE_ID_SUFFIX = "_middle"
 # vanes to about 17 whenever the drape moves, and what the hub does with the
 # vane *target* then is unknown, so a tracked vane axis could keep the drape
 # "moving" until the failsafe and make verify re-send every draw. The tilt
-# attribute still follows what the hub reports.
+# attribute still follows what the hub reports, and the coordinator keeps
+# polling fast for UNTRACKED_SETTLE_SEC after a command that changes an
+# untracked axis, so that report is not left to the idle poll.
 PROFILE_AXES: dict[str, tuple[str, ...]] = {
     PROFILE_SHEER: AXES,
     PROFILE_TWO_RAIL: AXES,
@@ -216,6 +230,13 @@ PROFILE_AXES: dict[str, tuple[str, ...]] = {
 POSITION_TOLERANCE = 2  # a hub position this close to the target counts as "arrived"
 PENDING_GRACE_SEC = 10.0  # how long a just-sent command counts as moving before the hub must reflect its target
 MOTION_FAILSAFE_SEC = 120.0  # a shade whose target != actual for this long with no change is treated as stalled
+# How long polling stays fast after a command that changes an axis the
+# shade's profile does not track (a drape's vanes): the hub reports an end
+# state 10-35 s after a command, and a drape's vane move takes about 12 s
+# (rtm's test). The window ends early when the hub reports the axis at the
+# commanded value, or anywhere else than where it was: the hub reports only
+# end states, so any change is the move finishing.
+UNTRACKED_SETTLE_SEC = 35.0
 # Cooldown of the coordinator's refresh requests (the stream's events). Home
 # Assistant's default is 10 s, which would hold back a "move finished" event
 # that arrives soon after another one (a shade's two events, or two shades in

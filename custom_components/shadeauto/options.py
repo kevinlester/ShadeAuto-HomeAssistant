@@ -9,6 +9,7 @@ from typing import Any
 
 from .const import (
     CONF_COLLISION_GUARD,
+    CONF_DRAPE_VANE_END_STOP,
     CONF_ESTIMATION_ENABLED,
     CONF_FULL_TRAVEL_TIME_SEC,
     CONF_LOW_BATTERY_THRESHOLD,
@@ -22,6 +23,7 @@ from .const import (
     CONF_VERIFY_DELAY_SEC,
     CONF_VERIFY_ENABLED,
     DEFAULT_COLLISION_GUARD,
+    DEFAULT_DRAPE_VANE_END_STOP,
     DEFAULT_ESTIMATION_ENABLED,
     DEFAULT_FULL_TRAVEL_TIME,
     DEFAULT_LOW_BATT,
@@ -33,6 +35,7 @@ from .const import (
     DEFAULT_TILT_MODE,
     DEFAULT_VERIFY_DELAY,
     DEFAULT_VERIFY_ENABLED,
+    MAX_DRAPE_VANE_END_STOP,
     MAX_RAIL_MIN_GAP,
     MIN_VERIFY_DELAY,
     TILT_MODE_AUTO,
@@ -100,6 +103,7 @@ class ShadeAutoOptions:
     collision_guard: bool = DEFAULT_COLLISION_GUARD
     rail_min_gap: int = DEFAULT_RAIL_MIN_GAP
     push_enabled: bool = DEFAULT_PUSH_ENABLED
+    drape_vane_end_stop: int = DEFAULT_DRAPE_VANE_END_STOP
 
     @classmethod
     def from_mapping(cls, options: Mapping[str, Any]) -> ShadeAutoOptions:
@@ -118,4 +122,11 @@ class ShadeAutoOptions:
             collision_guard=_read(options, CONF_COLLISION_GUARD, DEFAULT_COLLISION_GUARD, bool),
             rail_min_gap=max(0, min(MAX_RAIL_MIN_GAP, _read(options, CONF_RAIL_MIN_GAP, DEFAULT_RAIL_MIN_GAP, int))),
             push_enabled=_read(options, CONF_PUSH_ENABLED, DEFAULT_PUSH_ENABLED, bool),
+            drape_vane_end_stop=max(
+                0,
+                min(
+                    MAX_DRAPE_VANE_END_STOP,
+                    _read(options, CONF_DRAPE_VANE_END_STOP, DEFAULT_DRAPE_VANE_END_STOP, int),
+                ),
+            ),
         )

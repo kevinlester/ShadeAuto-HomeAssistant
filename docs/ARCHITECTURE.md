@@ -343,7 +343,7 @@ profile is fixed after that, because the entities are built from it.
 | `sheer` | 48/3, 49/3 (PerfectSheer) | one cover with lift and tilt (tilt unless `tilt_mode` is `off`) | `bottom`, `middle` | always `(bottom, middle)`; [PerfectSheer](#perfectsheer-sheer) |
 | `single_rail` | every other detail of 32, 48 and 49: 32/0, 32/2 (cellular), 48/1, 49/1 (roller), 48/2, 49/2 (roman) | one cover, lift only | `bottom` | `bottom` alone, as in 0.3.0; [Single-rail and legacy](#single-rail-and-legacy) |
 | `two_rail` | 33/any, 32/3, 32/4, 32/5 (day/night, top-down/bottom-up) | the cover for the bottom rail, plus a "Top" cover for the upper rail | `bottom`, `middle` | always both rails, collision guard; [Two-rail](#two-rail-commands-and-the-collision-guard) |
-| `drape` | 80/any (SmartDrape) | one cover with the draw and vane tilt on the hub's scale (tilt unless `tilt_mode` is `off`) | `bottom` | always `(bottom, middle)`: a draw restates the vanes the hub last reported, a tilt restates where the draw is heading; nothing is lowered first |
+| `drape` | 80/any (SmartDrape) | one cover with the draw and vane tilt on the hub's scale, re-mapped by `drape_vane_end_stop` (tilt unless `tilt_mode` is `off`) | `bottom` | always `(bottom, middle)`: a draw restates the vanes the hub last reported, a tilt restates where the draw is heading; nothing is lowered first |
 | `legacy` | 1/any (shutter), 32/48/49 without a `ModuleDetail`, anything unrecognised | one cover, lift only | `bottom` | as `single_rail` |
 
 Why each profile is the way it is:
@@ -361,22 +361,34 @@ Why each profile is the way it is:
   type 33 shade. A bottom-only payload would set the upper rail's target to 0
   and pull it down, so both rails go in every command.
 - **`drape`** is upstream PR #7 as a profile. That PR drove the same two
-  fields and its thread reports tilt working on three SmartDrapes; this project
-  has not run one. The vane axis is deliberately not tracked: PR #7 saw the
-  motor reset the vanes to about 17 during every draw, and what the hub does
-  with the vane target then is unknown, so a tracked vane axis could keep the
-  drape "moving" until the failsafe and make verify re-send every draw. The
-  cover reads `current_tilt_position` from the raw status record instead, and
-  `register_command` drops the vane value from the pending targets of any
-  profile that does not track that axis (`_tracked_middle`).
+  fields; rtm tested this profile on three 80/1 drapes (firmware 0.2.3) and
+  every command did what it was designed to. The vane axis is deliberately
+  not tracked: PR #7 saw the motor reset the vanes to about 17 during every
+  draw, and what the hub does with the vane target then is unknown, so a
+  tracked vane axis could keep the drape "moving" until the failsafe and make
+  verify re-send every draw. The cover reads `current_tilt_position` from the
+  raw status record instead, and `register_command` drops the vane value
+  from the pending targets of any profile that does not track that axis
+  (`_tracked_middle`). An untracked axis still needs its report fetched
+  promptly: `_watch_untracked` keeps the poll interval at `motion_poll_sec`
+  for up to `UNTRACKED_SETTLE_SEC` after a command that changes the vanes
+  (a tilt, not a draw that restates them), and `_update_untracked` ends the
+  window as soon as `/status` reports the axis at the commanded value or
+  anywhere other than where it was, since the hub reports end states only
+  (a drape sent 0 reports 17). A stop or a discarded command ends it too.
+  The vanes themselves stop short of the hub's 0 and 100 (17 and 83 on the
+  drapes tested); `drape_vane_end_stop` stretches that reachable range onto
+  Home Assistant's 0-100 (`drape_tilt_to_ha`, `drape_tilt_to_hub` in
+  `cover.py`, symmetric about 50 so open stays 50). The vanes a draw
+  restates never go through the map: hub value in, hub value out.
 - **`legacy`** is for families with no verified behaviour in this codebase.
   It does the least that can go wrong: lift only, the 0.3.0 payload.
   Shutters (`KNOWN_UNSUPPORTED_MODULE_TYPES`) get it quietly;
   a pair that is not in the tables at all also logs a warning asking the user
   to report its type, so the tables can grow from real reports.
 
-`tilt_mode` (`auto` or `off`) only matters for `sheer`: `auto` exposes tilt on
-those shades, `off` hides it. It replaced 0.4.0's `tilt_enabled`, which put
+`tilt_mode` (`auto` or `off`) only matters for `sheer` and `drape`: `auto`
+exposes tilt on those shades, `off` hides it. It replaced 0.4.0's `tilt_enabled`, which put
 tilt on every shade whether it had vanes or not; stored values are migrated
 (`true` becomes `auto`, `false` becomes `off`).
 
@@ -649,7 +661,8 @@ from `OptionsFlowWithReload`, so saving the form reloads the entry.
 | `push_enabled` | `__init__`, listener | "Use the hub's change notifications (push updates)": push updates from the hub's `/notification` stream (`DEFAULT_PUSH_ENABLED`, off; an entry saved before 0.6.0 stays on polling until the option is turned on). Off: no listener is created, the stream is never opened and updates come from polling only, as in 0.5.0. Verify still sends its per-shade `StatusRequest` before a retry (the wait then always runs 10 s); only `verify_enabled` off stops it |
 | `poll_seconds` | coordinator | idle poll interval |
 | `motion_poll_sec` | coordinator | poll interval while anything moves |
-| `tilt_mode` | cover | `auto`: tilt features and `current_tilt_position` on `sheer` shades; `off`: no tilt anywhere. Replaces `tilt_enabled` (migrated) |
+| `tilt_mode` | cover | `auto`: tilt features and `current_tilt_position` on `sheer` and `drape` shades; `off`: no tilt anywhere. Replaces `tilt_enabled` (migrated) |
+| `drape_vane_end_stop` | cover | the hub's vane value a `drape` reports when told to close, 0–49 (default 0: the hub's scale as it is); above 0, `end_stop`–`100 - end_stop` is shown and set as tilt 0–100 |
 | `collision_guard`, `rail_min_gap` | cover | the two-rail collision guard and its minimum gap, 0–50 % (on, 0) |
 | `low_battery_threshold` | binary_sensor | when "battery low" turns on |
 | `send_spacing_sec` | api | minimum gap between `/control` posts; default 1.5 s, from kedube/ha-norman's 13-shade measurements (HUB_PROTOCOL.md 4.8) |
@@ -683,7 +696,7 @@ from `OptionsFlowWithReload`, so saving the form reloads the entry.
   shows the device name); the Top cover and the battery entities add a
   translated suffix from `translations/en.json`.
 - Supported features depend on the profile: lift and stop on every cover,
-  tilt only on `sheer` shades with `tilt_mode` `auto`.
+  tilt only on `sheer` and `drape` shades with `tilt_mode` `auto`.
 
 ## Adding things
 

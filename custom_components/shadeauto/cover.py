@@ -9,8 +9,10 @@
   rails are heights on the same axis, 0 lowered to 100 raised;
 * **drape** (SmartDrape): one cover, the draw on the bottom rail and vane
   tilt on the middle rail, on the hub's own scale (0 and 100 closed, 50
-  open). Every command carries both fields, restating the one it does not
-  change; only the draw is tracked (see ``PROFILE_AXES`` in ``const.py``).
+  open) unless the ``drape_vane_end_stop`` option re-maps the reachable
+  range onto 0-100. Every command carries both fields, restating the one it
+  does not change; only the draw is tracked (see ``PROFILE_AXES`` in
+  ``const.py``).
 
 Positions come from the hub. Because the hub reports only end states, a
 cover interpolates its position slider during a move ("estimation") from the
@@ -141,6 +143,30 @@ def plan_rail_move(axis: str, target: int, held: int, *, guard: bool, gap: int) 
         return held, target
     middle = max(target, gap)
     return max(0, min(held, middle - gap)), middle
+
+
+def drape_tilt_to_ha(vanes: int, end_stop: int) -> int:
+    """The tilt Home Assistant shows for the hub's vane value ``vanes``.
+
+    With ``end_stop`` 0 the hub's value is shown as it is. Otherwise the
+    range the vanes can reach, ``end_stop`` to ``100 - end_stop``, is
+    stretched onto 0-100, so the position the hub reports after a close
+    reads as 0 or 100. The map is symmetric about 50, so open (50) stays 50.
+    A value outside the reachable range is clamped, not extrapolated.
+    """
+    if end_stop <= 0:
+        return clamp_position(vanes)
+    span = 100 - 2 * end_stop
+    return clamp_position(round((vanes - end_stop) * 100 / span))
+
+
+def drape_tilt_to_hub(tilt: int, end_stop: int) -> int:
+    """The hub's vane value for the tilt ``tilt`` Home Assistant asked for; the inverse of :func:`drape_tilt_to_ha`."""
+    tilt = clamp_position(tilt)
+    if end_stop <= 0:
+        return tilt
+    span = 100 - 2 * end_stop
+    return clamp_position(end_stop + round(tilt * span / 100))
 
 
 async def async_setup_entry(
@@ -438,12 +464,16 @@ class SheerCover(ShadeAutoCover):
 class DrapeCover(ShadeAutoCover):
     """A SmartDrape: the draw on the bottom rail plus vane tilt on the middle rail, unless tilt mode is off.
 
-    What upstream PR #7 did, which its thread reports working on three
-    SmartDrapes, expressed as a profile:
+    What upstream PR #7 did, which rtm confirmed on three SmartDrapes,
+    expressed as a profile:
 
-    * the tilt is the hub's own value, not re-mapped: 0 and 100 are closed in
-      opposite directions and 50 is open, so ``open_cover_tilt`` sends 50 and
-      ``close_cover_tilt`` sends 0;
+    * the tilt is the hub's own value: 0 and 100 are closed in opposite
+      directions and 50 is open, so ``open_cover_tilt`` sends 50 and
+      ``close_cover_tilt`` sends 0. The ``drape_vane_end_stop`` option
+      stretches the range the vanes really reach (17-83 on the drapes
+      tested) onto 0-100 (:func:`drape_tilt_to_ha`, :func:`drape_tilt_to_hub`);
+      the vanes restated in a draw stay on the hub's scale, hub value to hub
+      value;
     * every draw command restates the vanes where the hub last reported them,
       because a bottom-only command makes the hub set the vane target to 0
       (closed); every tilt command restates the draw where it is heading;
@@ -452,8 +482,11 @@ class DrapeCover(ShadeAutoCover):
     Only the draw is tracked (``PROFILE_AXES``): the motor resets the vanes
     while the drape moves (PR #7), so the vane axis is left out of motion and
     verify, and ``current_tilt_position`` is read straight from the hub's
-    last ``/status`` record. With tilt mode off the commands are the same;
-    only the tilt features and the attribute go away.
+    last ``/status`` record. The coordinator polls fast for a while after a
+    tilt all the same (``UNTRACKED_SETTLE_SEC``), so the new vane position
+    shows up within seconds of the move ending rather than at the next idle
+    poll. With tilt mode off the commands are the same; only the tilt
+    features and the attribute go away.
     """
 
     _attr_name = None  # the main entity carries the device name
@@ -461,6 +494,7 @@ class DrapeCover(ShadeAutoCover):
     def __init__(self, coordinator: ShadeAutoCoordinator, uid: str) -> None:
         super().__init__(coordinator, uid)
         self._has_tilt = coordinator.options.tilt_mode == TILT_MODE_AUTO
+        self._end_stop = coordinator.options.drape_vane_end_stop
         self._attr_supported_features = LIFT_FEATURES | (TILT_FEATURES if self._has_tilt else CoverEntityFeature(0))
 
     def _reported_vanes(self) -> int | None:
@@ -471,7 +505,8 @@ class DrapeCover(ShadeAutoCover):
     def current_cover_tilt_position(self) -> int | None:
         if not self._has_tilt:
             return None
-        return self._reported_vanes()
+        vanes = self._reported_vanes()
+        return None if vanes is None else drape_tilt_to_ha(vanes, self._end_stop)
 
     async def _async_draw(self, bottom: int) -> None:
         """Move the drape, keeping the vanes where the hub says they are."""
@@ -482,15 +517,15 @@ class DrapeCover(ShadeAutoCover):
             _LOGGER.debug("UID %s: no vane position reported; sending the draw alone", self._uid)
         await self._async_send(bottom=clamp_position(bottom), middle=vanes)
 
-    async def _async_tilt(self, middle: int) -> None:
-        """Set the vanes, keeping the drape where it is heading."""
+    async def _async_tilt(self, tilt: int) -> None:
+        """Set the vanes to Home Assistant's ``tilt``, keeping the drape where it is heading."""
         bottom = self.coordinator.get_held_position(self._uid, AXIS_BOTTOM)
         if bottom is None:
             raise HomeAssistantError(
                 f"Could not tilt shade {self.shade_name}: the hub has not reported how far it is drawn, "
                 "and every command has to say where to hold it"
             )
-        await self._async_send(bottom=bottom, middle=clamp_position(middle))
+        await self._async_send(bottom=bottom, middle=drape_tilt_to_hub(tilt, self._end_stop))
 
     async def async_set_cover_position(self, **kwargs: Any) -> None:
         await self._async_draw(kwargs[ATTR_POSITION])

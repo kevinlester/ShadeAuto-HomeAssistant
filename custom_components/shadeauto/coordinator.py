@@ -74,6 +74,7 @@ from .const import (
     PROFILE_LEGACY,
     REFRESH_COOLDOWN_SEC,
     STATUS_REPORT_WAIT_SEC,
+    UNTRACKED_SETTLE_SEC,
 )
 from .options import ShadeAutoOptions
 from .util import to_int
@@ -189,6 +190,12 @@ class ShadeState:
     retry_attempted: bool = False
     stopped_ts: float | None = None  # monotonic time of our last stop command
     cancel_verify: CALLBACK_TYPE | None = None  # pending verify timer, if any
+    # A command that changes an axis the profile does not track (a drape's
+    # vanes): the value it asked for, what the hub reported before it, and
+    # until when (monotonic) polling stays fast waiting for the hub's report.
+    untracked_middle: int | None = None
+    untracked_middle_before: int | None = None
+    untracked_until: float | None = None
 
 
 class ShadeAutoCoordinator(DataUpdateCoordinator[dict[str, Any]]):
@@ -309,7 +316,11 @@ class ShadeAutoCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         return not stalled
 
     def _any_unsettled(self) -> bool:
-        return any(self._unsettled(uid, axis) for uid in self._shades for axis in self.axes_for(uid))
+        """True while any tracked axis is unsettled, or an untracked-axis command is still waiting for its report."""
+        if any(self._unsettled(uid, axis) for uid in self._shades for axis in self.axes_for(uid)):
+            return True
+        now = time.monotonic()
+        return any(s.untracked_until is not None and now < s.untracked_until for s in self._shades.values())
 
     def is_moving(self, uid: str, axis: str) -> bool:
         """True while the hub's target differs from its actual position (or our command is pending).
@@ -428,7 +439,24 @@ class ShadeAutoCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             for axis in self.axes_for(uid):
                 actual_key, target_key = AXIS_FIELDS[axis]
                 self._update_axis(uid, axis, to_int(record.get(actual_key)), to_int(record.get(target_key)))
+            self._update_untracked(uid, record)
         return by_uid
+
+    def _update_untracked(self, uid: str, record: dict[str, Any]) -> None:
+        """End the fast-poll window of an untracked-axis command once the hub has reported the move's end.
+
+        The hub reports end states only, so the axis reading anything other
+        than what it read when the command was registered means the move is
+        over, whether or not it landed on the value asked for (a drape sent
+        vanes 0 lands at 17).
+        """
+        shade = self._shades.get(uid)
+        if shade is None or shade.untracked_until is None:
+            return
+        reported = to_int(record.get(AXIS_FIELDS[AXIS_MIDDLE][0]))
+        if reported == shade.untracked_middle or reported != shade.untracked_middle_before:
+            _LOGGER.debug("UID %s: untracked middle reported at %s; back to idle polling", uid, reported)
+            shade.untracked_until = None
 
     def _update_axis(self, uid: str, axis: str, actual: int | None, target: int | None) -> None:
         """Record what the hub reports for one axis and reconcile it with our pending command."""
@@ -539,9 +567,30 @@ class ShadeAutoCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         middle = None if middle is None else int(middle)
         shade.command = (bottom, middle)
         self._set_pending(shade, bottom=bottom, middle=self._tracked_middle(uid, middle), sent=False)
+        self._watch_untracked(uid, shade, middle)
         self._cancel_verify(shade)
         self._apply_poll_interval()
         return cmd_id
+
+    def _watch_untracked(self, uid: str, shade: ShadeState, middle: int | None) -> None:
+        """Keep polling fast for a command that changes a middle axis the profile does not track.
+
+        A drape's vanes are restated in every draw and changed by every
+        tilt, but the axis carries no pending target (``_tracked_middle``),
+        so without this a tilt-only command would settle at the first poll
+        (the draw is already where the command holds it) and the new vane
+        position would wait for the idle poll. A command that restates the
+        axis where the hub already reports it has nothing to wait for.
+        """
+        shade.untracked_until = None
+        if middle is None or AXIS_MIDDLE in self.axes_for(uid):
+            return
+        before = to_int(self.status_for(uid).get(ATTR_MIDDLE_RAIL))
+        if before == middle:
+            return
+        shade.untracked_middle = middle
+        shade.untracked_middle_before = before
+        shade.untracked_until = time.monotonic() + UNTRACKED_SETTLE_SEC
 
     def command_sent(self, uid: str, cmd_id: int) -> None:
         """Start the clocks of a registered command whose ``/control`` post the hub has answered.
@@ -562,6 +611,8 @@ class ShadeAutoCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         for state in shade.axes.values():
             if state.pending is not None:
                 state.pending_ts = now
+        if shade.untracked_until is not None:
+            shade.untracked_until = now + UNTRACKED_SETTLE_SEC  # the wait runs from the post, like the grace
         bottom, middle = shade.command
         if self.options.verify_enabled and self.options.verify_delay_sec > 0:
 
@@ -595,6 +646,7 @@ class ShadeAutoCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         shade.cmd_id = self._cmd_seq
         for state in shade.axes.values():
             state.pending = None
+        shade.untracked_until = None
         self._cancel_verify(shade)
         self._apply_poll_interval()
 
@@ -606,6 +658,7 @@ class ShadeAutoCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         shade.stopped_ts = time.monotonic()
         for state in shade.axes.values():
             state.pending = None
+        shade.untracked_until = None
         self._cancel_verify(shade)
         self._apply_poll_interval()
 

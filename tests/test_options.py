@@ -25,6 +25,7 @@ def test_defaults() -> None:
     assert options.rail_min_gap == 0
     assert options.verify_delay_sec == 60
     assert options.push_enabled is False  # opt-in: off means 0.5.0's polling only
+    assert options.drape_vane_end_stop == 0  # a drape's vanes on the hub's scale, as PR #7 showed them
     # kedube/ha-norman measured drops at 1.0-1.2 s between commands.
     assert options.send_spacing_sec == 1.5
 
@@ -70,6 +71,12 @@ def test_verify_delay_below_the_form_minimum_is_raised_to_it(stored: float, expe
 @pytest.mark.parametrize(("stored", "expected"), [(-5, 0), (0, 0), (10.0, 10), (50, 50), (80, 50)])
 def test_rail_gap_is_kept_inside_the_form_range(stored: float, expected: int) -> None:
     assert ShadeAutoOptions.from_mapping({"rail_min_gap": stored}).rail_min_gap == expected
+
+
+@pytest.mark.parametrize(("stored", "expected"), [(-5, 0), (0, 0), (17.0, 17), (49, 49), (50, 49), (80, 49)])
+def test_drape_vane_end_stop_is_kept_inside_the_form_range(stored: float, expected: int) -> None:
+    """50 or more would leave the vanes no range at all."""
+    assert ShadeAutoOptions.from_mapping({"drape_vane_end_stop": stored}).drape_vane_end_stop == expected
 
 
 @pytest.mark.parametrize(("stored", "expected"), [(True, True), (False, False), (1, True), (0, False)])

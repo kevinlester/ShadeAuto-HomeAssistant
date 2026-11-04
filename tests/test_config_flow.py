@@ -134,6 +134,7 @@ async def test_options_flow_reloads_entry_with_new_values(
             "motion_poll_sec": 1.5,
             "push_enabled": True,
             "tilt_mode": "off",
+            "drape_vane_end_stop": 17,
             "collision_guard": False,
             "rail_min_gap": 10,
             "low_battery_threshold": 30,
@@ -154,6 +155,7 @@ async def test_options_flow_reloads_entry_with_new_values(
     assert coordinator.options.push_enabled is True  # the test entries start with it off
     assert integration.runtime_data.listener is not None
     assert coordinator.options.tilt_mode == "off"
+    assert coordinator.options.drape_vane_end_stop == 17
     assert coordinator.options.collision_guard is False
     assert coordinator.options.rail_min_gap == 10
     assert coordinator.options.low_battery_threshold == 30
@@ -183,6 +185,7 @@ async def test_options_form_offers_tilt_mode_instead_of_tilt_enabled(hass: HomeA
     defaults = _form_defaults(result)
     assert "tilt_enabled" not in defaults
     assert defaults["tilt_mode"] == "off"
+    assert defaults["drape_vane_end_stop"] == 0
     assert defaults["collision_guard"] is True
     assert defaults["rail_min_gap"] == 0
 

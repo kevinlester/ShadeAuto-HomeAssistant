@@ -16,11 +16,11 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   model reads "SmartDrape". Tested by rtm on three 80/1 drapes (firmware
   0.2.3): tilt, draw, stop and the vanes kept through a draw all behaved as
   designed. 0.6.0 drove SmartDrapes as lift-only shades.
-- A **SmartDrapes: vane value the hub reports when the vanes are closed**
-  option. A drape's vanes stop short of the hub's 0 and 100 (17 and 83 on
-  the drapes tested), so close tilt read back as 17. Set to that value, the
-  reachable range is shown and set as 0 to 100: closed reads 0 and 100, open
-  stays 50. Default 0, which keeps the hub's scale as it is.
+- A **SmartDrapes: Min vane value when closed** option. A drape's vanes
+  stop short of the hub's 0 and 100 (17 and 83 on the drapes tested), so
+  close tilt read back as 17. Set to that value, the reachable range is
+  shown and set as 0 to 100: closed reads 0 and 100, open stays 50. Default
+  0, which keeps the hub's scale as it is.
 
 ### Changed
 - A drape's `current_tilt_position` follows a tilt within seconds instead of

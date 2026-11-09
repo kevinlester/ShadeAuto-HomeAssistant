@@ -45,7 +45,7 @@
         "data_description": {
           "push_enabled": "Reads a shade as soon as the hub announces that it changed, instead of at the next poll. Polling continues either way.",
           "tilt_mode": "Automatic exposes tilt on shades with vanes (PerfectSheer and SmartDrape) only. Off hides it everywhere; the vanes keep their setting either way.",
-          "drape_vane_end_stop": "0 shows a drape's vanes on the hub's own scale (0 and 100 closed, 50 open). If closing the vanes reads back as something else, say 17, enter that: the hub's 17 to 83 is then shown as 0 to 100, so closed reads 0 and 100. Open stays 50.",
+          "drape_vane_end_stop": "0 shows a drape's vanes on the hub's own scale (0 and 100 closed, 50 open). While a drape is open its vanes stop short of 0 and 100; if closing them reads back as 17, enter 17: the hub's 17 to 83 is then shown as 0 to 100 on an open drape, so closed reads 0 and 100 and open stays 50. A fully closed drape keeps the hub's scale, and closing the drape shuts vanes that were closed as far as it allowed.",
           "collision_guard": "When a move would cross the rails, the other rail moves out of the way. Applies to top-down/bottom-up and day/night shades only.",
           "send_spacing_sec": "The hub drops commands sent too close together while still reporting success."
         }

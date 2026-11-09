@@ -52,7 +52,12 @@ from custom_components.shadeauto.const import (
     UNTRACKED_SETTLE_SEC,
 )
 from custom_components.shadeauto.coordinator import ShadeAutoCoordinator, shade_profile
-from custom_components.shadeauto.cover import drape_tilt_to_ha, drape_tilt_to_hub, plan_rail_move
+from custom_components.shadeauto.cover import (
+    drape_tilt_to_ha,
+    drape_tilt_to_hub,
+    drape_vanes_for_draw,
+    plan_rail_move,
+)
 
 from .conftest import (
     ALL_UIDS,
@@ -745,7 +750,7 @@ async def test_every_drape_draw_restates_the_vanes_the_hub_reports(
 
     await _call(hass, SERVICE_SET_COVER_POSITION, LOUNGE_COVER, **{ATTR_POSITION: 70})
     await _call(hass, SERVICE_CLOSE_COVER, LOUNGE_COVER)
-    hub.external_move(LOUNGE, middle=17)  # the motor reset the vanes during the draw, as PR #7 saw
+    hub.external_move(LOUNGE, middle=17)  # the hub held the vanes to 17 as the draw finished (rtm)
     await _poll(hass, freezer, DEFAULT_POLL + 1)  # the idle poll picks it up
     await _call(hass, SERVICE_OPEN_COVER, LOUNGE_COVER)
 
@@ -797,7 +802,7 @@ async def test_drape_stop_and_tilt_stop_both_stop_the_motor(hass: HomeAssistant,
 async def test_drape_motion_and_verify_follow_the_draw_only(
     hass: HomeAssistant, hub: FakeHub, freezer: FrozenDateTimeFactory
 ) -> None:
-    """The motor resets the vanes during a draw (PR #7); that must neither keep the drape moving nor retry."""
+    """The hub rewrites the vane target to 17 as a draw finishes (rtm); that must not keep the drape moving or retry."""
     _add_lounge(hub)
     entry = await _setup(hass, VERIFY_OPTIONS)
     coordinator = _coordinator(entry)
@@ -937,6 +942,10 @@ async def test_drape_stop_during_a_tilt_ends_the_fast_polling(hass: HomeAssistan
         # Outside the reachable range: clamped, not extrapolated.
         (0, 17, 0),
         (100, 17, 100),
+        # A landing within POSITION_TOLERANCE of a stop is the stop (rtm's drape settled at 82 for 83).
+        (19, 17, 0),
+        (82, 17, 100),
+        (20, 17, 5),
         # The largest end stop still leaves a range.
         (49, 49, 0),
         (50, 49, 50),
@@ -945,6 +954,30 @@ async def test_drape_stop_during_a_tilt_ends_the_fast_polling(hass: HomeAssistan
 )
 def test_drape_tilt_shown_for_the_hubs_vane_value(vanes: int, end_stop: int, tilt: int) -> None:
     assert drape_tilt_to_ha(vanes, end_stop) == tilt
+
+
+@pytest.mark.parametrize(
+    ("vanes", "from_draw", "to_draw", "end_stop", "expected"),
+    [
+        # Closing an open drape takes vanes at a stop (or within tolerance of it) fully shut; the rest stay put.
+        (17, 50, 0, 17, 0),
+        (19, 50, 0, 17, 0),
+        (83, 50, 0, 17, 100),
+        (82, 50, 0, 17, 100),
+        (20, 50, 0, 17, 20),
+        (33, 50, 0, 17, 33),
+        (50, 50, 0, 17, 50),
+        # Not a close, not from open, draw unknown, or no end stop: the hub's value as it is.
+        (17, 50, 40, 17, 17),
+        (17, 0, 0, 17, 17),
+        (17, None, 0, 17, 17),
+        (17, 50, 0, 0, 17),
+    ],
+)
+def test_drape_vanes_restated_by_a_draw(
+    vanes: int, from_draw: int | None, to_draw: int, end_stop: int, expected: int
+) -> None:
+    assert drape_vanes_for_draw(vanes, from_draw=from_draw, to_draw=to_draw, end_stop=end_stop) == expected
 
 
 @pytest.mark.parametrize(
@@ -991,6 +1024,64 @@ async def test_drape_vane_end_stop_maps_the_reachable_range_onto_0_to_100(
     hub.external_move(LOUNGE, middle=0)  # the app sent the hub's own 0: shown as closed, not below it
     await _poll(hass, freezer, DEFAULT_POLL + 1)
     assert hass.states.get(LOUNGE_COVER).attributes[ATTR_CURRENT_TILT_POSITION] == 0
+
+
+async def test_drape_vane_end_stop_does_not_apply_while_the_drape_is_fully_closed(
+    hass: HomeAssistant, hub: FakeHub, freezer: FrozenDateTimeFactory
+) -> None:
+    """At a draw of 0 the vanes reach 0 and 100 (rtm), so the hub's scale is shown and sent as it is there."""
+    hub.add_shade(LOUNGE, "Lounge", 80, 1, bottom=0, middle=17)  # closed, vanes where an open drape left them
+    await _setup(hass, {"drape_vane_end_stop": 17})
+    assert hass.states.get(LOUNGE_COVER).attributes[ATTR_CURRENT_TILT_POSITION] == 17
+
+    await _call(hass, SERVICE_CLOSE_COVER_TILT, LOUNGE_COVER)
+    assert hass.states.get(LOUNGE_COVER).attributes[ATTR_CURRENT_TILT_POSITION] == 0
+    await _call(hass, SERVICE_SET_COVER_TILT_POSITION, LOUNGE_COVER, **{ATTR_TILT_POSITION: 33})
+    assert hass.states.get(LOUNGE_COVER).attributes[ATTR_CURRENT_TILT_POSITION] == 33
+    await _call(hass, SERVICE_SET_COVER_TILT_POSITION, LOUNGE_COVER, **{ATTR_TILT_POSITION: 100})
+    assert hass.states.get(LOUNGE_COVER).attributes[ATTR_CURRENT_TILT_POSITION] == 100
+    await _call(hass, SERVICE_CLOSE_COVER, LOUNGE_COVER)  # already closed: the vanes are restated as they are
+    assert [_rails(cmd) for cmd in _commands_for(hub, LOUNGE)] == [(0, 0), (0, 33), (0, 100), (0, 100)]
+
+    # The attribute follows the draw the hub reports: the same 17 reads 0 once the drape is open.
+    hub.external_move(LOUNGE, bottom=50, middle=17)
+    await _poll(hass, freezer, DEFAULT_POLL + 1)
+    assert hass.states.get(LOUNGE_COVER).attributes[ATTR_CURRENT_TILT_POSITION] == 0
+    await _call(hass, SERVICE_CLOSE_COVER_TILT, LOUNGE_COVER)  # open: close tilt is the stop
+    assert _rails(hub.commands[-1]) == (50, 17)
+
+
+@pytest.mark.parametrize(
+    ("vanes", "sent"),
+    [(17, 0), (19, 0), (83, 100), (82, 100), (33, 33), (50, 50)],
+)
+async def test_closing_a_drape_with_the_end_stop_set_shuts_vanes_that_were_at_the_stop(
+    hass: HomeAssistant, hub: FakeHub, vanes: int, sent: int
+) -> None:
+    """rtm's evening close: with the option at 17, one close must leave the vanes at 0, not parked at 17."""
+    hub.add_shade(LOUNGE, "Lounge", 80, 1, bottom=50, middle=vanes)
+    await _setup(hass, {"drape_vane_end_stop": 17})
+
+    await _call(hass, SERVICE_CLOSE_COVER, LOUNGE_COVER)
+    assert _rails(hub.commands[-1]) == (0, sent)
+    state = hass.states.get(LOUNGE_COVER)
+    assert state.state == CoverState.CLOSED
+    assert state.attributes[ATTR_CURRENT_TILT_POSITION] == sent  # at draw 0 the hub's value is shown as it is
+
+    await _call(hass, SERVICE_SET_COVER_POSITION, LOUNGE_COVER, **{ATTR_POSITION: 40})  # a draw that is not a close
+    assert _rails(hub.commands[-1]) == (40, sent)
+
+
+async def test_closing_a_drape_without_the_end_stop_restates_the_vanes_as_before(
+    hass: HomeAssistant, hub: FakeHub
+) -> None:
+    """With the option at 0 (the default rtm approved) nothing about a close changes."""
+    hub.add_shade(LOUNGE, "Lounge", 80, 1, bottom=50, middle=17)
+    await _setup(hass)
+
+    await _call(hass, SERVICE_CLOSE_COVER, LOUNGE_COVER)
+    assert _rails(hub.commands[-1]) == (0, 17)
+    assert hass.states.get(LOUNGE_COVER).attributes[ATTR_CURRENT_TILT_POSITION] == 17
 
 
 async def test_drape_whose_hub_reports_no_vanes_is_drawn_with_the_0_3_0_payload(

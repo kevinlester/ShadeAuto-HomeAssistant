@@ -11,16 +11,20 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   directions, 50 open; open tilt sends 50, close tilt sends 0), restates the
   vanes the hub last reported in every draw so the hub does not close them,
   and restates the draw in every tilt. Nothing is lowered before a tilt. Only
-  the draw is tracked for motion and verify, because the motor resets the
-  vanes during a draw (upstream PR #7, whose tilt this follows). The device
-  model reads "SmartDrape". Tested by rtm on three 80/1 drapes (firmware
-  0.2.3): tilt, draw, stop and the vanes kept through a draw all behaved as
-  designed. 0.6.0 drove SmartDrapes as lift-only shades.
-- A **SmartDrapes: Min vane value when closed** option. A drape's vanes
-  stop short of the hub's 0 and 100 (17 and 83 on the drapes tested), so
-  close tilt read back as 17. Set to that value, the reachable range is
-  shown and set as 0 to 100: closed reads 0 and 100, open stays 50. Default
-  0, which keeps the hub's scale as it is.
+  the draw is tracked for motion and verify, because the hub rewrites the
+  vane target as a draw finishes (upstream PR #7, whose tilt this follows).
+  The device model reads "SmartDrape". Tested by rtm on three 80/1 drapes
+  (firmware 0.2.3): tilt, draw, stop and the vanes kept through a draw all
+  behaved as designed. 0.6.0 drove SmartDrapes as lift-only shades.
+- A **SmartDrapes: Min vane value when closed** option. While a drape is
+  open its vanes stop short of the hub's 0 and 100 (17 and 83 on the drapes
+  tested; the hub holds them there and the vendor app shows the same), so
+  close tilt read back as 17; with the drape fully closed they reach 0 and
+  100. Set to 17, the open drape's range is shown and set as 0 to 100
+  (closed reads 0 and 100, open stays 50, a landing within 2 of a stop
+  counts as the stop), a fully closed drape keeps the hub's scale, and
+  closing the drape takes vanes at a stop fully shut in the same command,
+  which the hub honours. Default 0, which keeps the hub's scale as it is.
 
 ### Changed
 - A drape's `current_tilt_position` follows a tilt within seconds instead of

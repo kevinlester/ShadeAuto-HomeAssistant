@@ -343,7 +343,7 @@ profile is fixed after that, because the entities are built from it.
 | `sheer` | 48/3, 49/3 (PerfectSheer) | one cover with lift and tilt (tilt unless `tilt_mode` is `off`) | `bottom`, `middle` | always `(bottom, middle)`; [PerfectSheer](#perfectsheer-sheer) |
 | `single_rail` | every other detail of 32, 48 and 49: 32/0, 32/2 (cellular), 48/1, 49/1 (roller), 48/2, 49/2 (roman) | one cover, lift only | `bottom` | `bottom` alone, as in 0.3.0; [Single-rail and legacy](#single-rail-and-legacy) |
 | `two_rail` | 33/any, 32/3, 32/4, 32/5 (day/night, top-down/bottom-up) | the cover for the bottom rail, plus a "Top" cover for the upper rail | `bottom`, `middle` | always both rails, collision guard; [Two-rail](#two-rail-commands-and-the-collision-guard) |
-| `drape` | 80/any (SmartDrape) | one cover with the draw and vane tilt on the hub's scale, re-mapped by `drape_vane_end_stop` (tilt unless `tilt_mode` is `off`) | `bottom` | always `(bottom, middle)`: a draw restates the vanes the hub last reported, a tilt restates where the draw is heading; nothing is lowered first |
+| `drape` | 80/any (SmartDrape) | one cover with the draw and vane tilt on the hub's scale, re-mapped on an open drape by `drape_vane_end_stop` (tilt unless `tilt_mode` is `off`) | `bottom` | always `(bottom, middle)`: a draw restates the vanes the hub last reported (a close with the end stop set shuts vanes at the stop), a tilt restates where the draw is heading; nothing is lowered first |
 | `legacy` | 1/any (shutter), 32/48/49 without a `ModuleDetail`, anything unrecognised | one cover, lift only | `bottom` | as `single_rail` |
 
 Why each profile is the way it is:
@@ -363,10 +363,12 @@ Why each profile is the way it is:
 - **`drape`** is upstream PR #7 as a profile. That PR drove the same two
   fields; rtm tested this profile on three 80/1 drapes (firmware 0.2.3) and
   every command did what it was designed to. The vane axis is deliberately
-  not tracked: PR #7 saw the motor reset the vanes to about 17 during every
-  draw, and what the hub does with the vane target then is unknown, so a
-  tracked vane axis could keep the drape "moving" until the failsafe and make
-  verify re-send every draw. The cover reads `current_tilt_position` from the
+  not tracked: with the drape open the hub holds the vanes to 17-83 and
+  rewrites the vane target to match as a draw finishes (rtm's hub log; PR #7
+  read this as the motor "resetting" the vanes), so a vane target of 0
+  restated in a draw is never reached, and a tracked vane axis would keep the
+  drape "moving" until the failsafe and make verify re-send every draw.
+  The cover reads `current_tilt_position` from the
   raw status record instead, and `register_command` drops the vane value
   from the pending targets of any profile that does not track that axis
   (`_tracked_middle`). An untracked axis still needs its report fetched
@@ -376,11 +378,20 @@ Why each profile is the way it is:
   window as soon as `/status` reports the axis at the commanded value or
   anywhere other than where it was, since the hub reports end states only
   (a drape sent 0 reports 17). A stop or a discarded command ends it too.
-  The vanes themselves stop short of the hub's 0 and 100 (17 and 83 on the
-  drapes tested); `drape_vane_end_stop` stretches that reachable range onto
-  Home Assistant's 0-100 (`drape_tilt_to_ha`, `drape_tilt_to_hub` in
-  `cover.py`, symmetric about 50 so open stays 50). The vanes a draw
-  restates never go through the map: hub value in, hub value out.
+  The vanes reach 0 and 100 only with the drape fully closed; open at all,
+  they stop at 17 and 83 (rtm; a draw command of 2 or more applies the
+  limit even when the drape does not move, and a command of 1 is ignored).
+  `drape_vane_end_stop` stretches the open drape's range onto Home
+  Assistant's 0-100 (`drape_tilt_to_ha`, `drape_tilt_to_hub` in `cover.py`,
+  symmetric about 50 so open stays 50, a landing within `POSITION_TOLERANCE`
+  of a stop counting as the stop). The stop in force is chosen per use
+  (`_end_stop_at`): for a tilt command by where the draw is heading, for the
+  attribute by the draw the hub reports, none at 0. The vanes a draw restates
+  stay hub values, with one exception in `drape_vanes_for_draw`: a close from
+  open sends vanes at a stop to 0 or 100, which the hub honours as the drape
+  arrives (rtm), so one close shuts everything. Vanes between the stops stay
+  put: the hub's stops do not move with the draw, so the same 33 reads 24 on
+  an open drape and 33 on a closed one.
 - **`legacy`** is for families with no verified behaviour in this codebase.
   It does the least that can go wrong: lift only, the 0.3.0 payload.
   Shutters (`KNOWN_UNSUPPORTED_MODULE_TYPES`) get it quietly;
@@ -662,7 +673,7 @@ from `OptionsFlowWithReload`, so saving the form reloads the entry.
 | `poll_seconds` | coordinator | idle poll interval |
 | `motion_poll_sec` | coordinator | poll interval while anything moves |
 | `tilt_mode` | cover | `auto`: tilt features and `current_tilt_position` on `sheer` and `drape` shades; `off`: no tilt anywhere. Replaces `tilt_enabled` (migrated) |
-| `drape_vane_end_stop` | cover | the hub's vane value a `drape` reports when told to close, 0–49 (default 0: the hub's scale as it is); above 0, `end_stop`–`100 - end_stop` is shown and set as tilt 0–100 |
+| `drape_vane_end_stop` | cover | the hub's vane value an open `drape` reports when told to close, 0–49 (default 0: the hub's scale as it is); above 0, `end_stop`–`100 - end_stop` is shown and set as tilt 0–100 while the drape is above 0, the hub's scale is kept at 0, and a close from open sends vanes at the stop to 0 or 100 |
 | `collision_guard`, `rail_min_gap` | cover | the two-rail collision guard and its minimum gap, 0–50 % (on, 0) |
 | `low_battery_threshold` | binary_sensor | when "battery low" turns on |
 | `send_spacing_sec` | api | minimum gap between `/control` posts; default 1.5 s, from kedube/ha-norman's 13-shade measurements (HUB_PROTOCOL.md 4.8) |

@@ -101,12 +101,15 @@ MAX_RAIL_MIN_GAP = 50  # PR #9's form range
 # STATUS_REPORT_WAIT_SEC). Polling runs either way, because the stream does
 # not replay what it missed while down.
 DEFAULT_PUSH_ENABLED = False  # opt-in until the stream has more hours on real hubs
-# Where a SmartDrape's vanes stop when told to close, on the hub's scale. 0
-# shows the hub's value as it is. Three drapes (ModuleType 80/1, firmware
-# 0.2.3, tested by rtm) sent 0 and 100 land at 17 and 83, so a user who sets
-# this to 17 sees the reachable range 17-83 as tilt 0-100: closing the vanes
-# then reads back as 0, not 17. The mapping is symmetric about 50, so open
-# stays 50 on both scales. At most 49: 50 would leave no range at all.
+# Where a SmartDrape's vanes stop when told to close while the drape is open,
+# on the hub's scale. 0 shows the hub's value as it is. Three drapes
+# (ModuleType 80/1, firmware 0.2.3, tested by rtm) sent 0 and 100 land at 17
+# and 83 whenever the drape is drawn open at all, and reach 0 and 100 only
+# with the drape fully closed. A user who sets this to 17 sees the open
+# drape's range 17-83 as tilt 0-100: closing the vanes then reads back as 0,
+# not 17, and closing the drape takes vanes at the stop fully shut. At a draw
+# of 0 the hub's scale is used unchanged. The mapping is symmetric about 50,
+# so open stays 50 on both scales. At most 49: 50 would leave no range at all.
 DEFAULT_DRAPE_VANE_END_STOP = 0
 MAX_DRAPE_VANE_END_STOP = 49
 
@@ -211,11 +214,11 @@ TOP_COVER_UNIQUE_ID_SUFFIX = "_middle"
 # Axes the coordinator tracks (pending targets, motion, fast polling, verify).
 # Single-rail and legacy shades track the bottom rail only, so a middle target
 # the hub never reaches (the stuck 100 above) cannot keep them "moving". A
-# drape tracks the bottom rail only as well: PR #7 found the motor resets the
-# vanes to about 17 whenever the drape moves, and what the hub does with the
-# vane *target* then is unknown, so a tracked vane axis could keep the drape
-# "moving" until the failsafe and make verify re-send every draw. The tilt
-# attribute still follows what the hub reports, and the coordinator keeps
+# drape tracks the bottom rail only as well: with the drape open the hub holds
+# the vanes to 17-83 and rewrites the vane *target* to match as a draw
+# finishes (rtm's hub log), so a vane target of 0 sent with a draw is never
+# reached and a tracked vane axis would make verify re-send every draw. The
+# tilt attribute still follows what the hub reports, and the coordinator keeps
 # polling fast for UNTRACKED_SETTLE_SEC after a command that changes an
 # untracked axis, so that report is not left to the idle poll.
 PROFILE_AXES: dict[str, tuple[str, ...]] = {

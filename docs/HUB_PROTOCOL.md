@@ -742,7 +742,7 @@ you own one of those shades, the notes below say what to check.
 | 32, 48, 49 with any other detail | Not known | Assumed as the rest of the family | None | `single_rail`, no warning |
 | 33/x | Cellular shade with two rails: day/night or top-down/bottom-up | The upper rail's height, on the same axis as the bottom rail | kedube: 33/3 on real hardware, 33/4-5 vendor app only; PR #9: one real type 33 shade | `two_rail` |
 | 32/3, 32/4, 32/5 | Cellular shade, top-down/bottom-up | As 33 | kedube: vendor app only (the app draws two sliders) | `two_rail` |
-| 80/x | SmartDrape | Vanes in seven stops, open at 50, closed at 0 and 100 | kedube: 80/1 from one user's diagnostics (issue #2); PR #7 matches, and its thread reports tilt working on three SmartDrapes | `drape` |
+| 80/x | SmartDrape | Vanes in stops about 17 apart, open at 50, closed at 0 and 100; held to 17-83 while the drape is open | kedube: 80/1 from one user's diagnostics (issue #2); PR #7 matches; rtm on three 80/1 drapes, firmware 0.2.3 (the `drape` profile and the limit) | `drape` |
 | 1/x | Shutter | No rails; the louvres are a separate `Position` field, 0-7 | kedube: vendor app only | `legacy` |
 | 32, 48, 49 without a `ModuleDetail` | Cannot be told | Unknown | | `legacy`, with a warning in the log |
 | anything else | | Unknown | | `legacy`, with a warning in the log |
@@ -814,11 +814,38 @@ The `drape` profile does what PR #7 did: the vanes are exposed on the hub's
 own scale (50 open, 0 and 100 closed), every draw restates the vane position
 the hub last reported (a bottom-only command would, by 4.3, send them to 0),
 every tilt restates the draw, and nothing is lowered first. Only the draw is
-tracked for motion and verify, because PR #7 saw the motor reset the vanes to
-about 17 during a draw and what the hub does with the vane *target* then is
-not known. **Unverified by this project**: whether the hub coerces the vane
-target during a draw, whether the seven stops are reported as the nearest
-value or as sent, and what a stop does to the vanes.
+tracked for motion and verify.
+
+rtm tested the profile on three 80/1 drapes (motor firmware 0.2.3, HA
+2026.9.4) and logged the hub through the sequences below (2026-11-03 to
+2026-11-09). What the hub does:
+
+- **The vane range depends on the draw.** With the drape fully closed
+  (`BottomRailPosition` 0) the vanes reach 0 and 100. With the drape open at
+  all, a vane target of 0 or 100 is taken, and about 3 s later the hub
+  rewrites `TargetMiddleRailPosition` to 17 or 83 and the vanes sit there.
+  The vendor app stops at the same place, so the limit is the shade's or
+  the hub's. This is what PR #7 described as the motor "resetting" the vanes
+  during a draw: a draw that restates vanes 0 arrives with the vane target
+  rewritten to 17 as the drape finishes.
+- **The limit keys off the commanded draw, with a dead band.** From 0/0, a
+  draw command of 1 is taken as the target and set back to 0 within about
+  3 s; nothing moves. A draw command of 2 does not move the drape either
+  (the bottom target is set back to 0) but sends the vanes to 17 about 12 s
+  later. A draw command of 5 moves the drape, which lands at 4.
+- **A vane target sent with a close is honoured as the drape arrives.** From
+  49/17, bottom 0 and middle 0 in one command: both targets stayed 0, the
+  vane target was never rewritten, and the drape arrived at 0/0 about 26 s
+  later. Vanes left at 17 when a drape closes stay at 17 until a tilt
+  command moves them; the hub never closes them on its own.
+- **Stops are reported as landed, not as sent**: sent 83, a drape settled
+  at 82. A tilt-only move takes about 12 s; the hub reports its end state
+  about 2 s later with push on.
+- **A stop during a draw** left the drape at the stop point with the vanes
+  untouched, and the next draw was fine.
+
+**Still unverified**: what a stop does during a vane-only move, and whether
+other firmware puts the limit anywhere other than 17/83.
 
 **Shutter (1/x).** kedube, from the vendor app's library only: no rails; the
 louvres are one `Position` field, 0-7 (7 shut, 3 horizontal), sent alone. The

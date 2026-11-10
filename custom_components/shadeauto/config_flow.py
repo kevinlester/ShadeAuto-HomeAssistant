@@ -27,6 +27,7 @@ from .api import ShadeAutoApi, ShadeAutoError
 from .compat import vol
 from .const import (
     CONF_COLLISION_GUARD,
+    CONF_DRAPE_VANE_END_STOP,
     CONF_ESTIMATION_ENABLED,
     CONF_FULL_TRAVEL_TIME_SEC,
     CONF_HOST,
@@ -40,6 +41,7 @@ from .const import (
     CONF_VERIFY_DELAY_SEC,
     CONF_VERIFY_ENABLED,
     DOMAIN,
+    MAX_DRAPE_VANE_END_STOP,
     MAX_RAIL_MIN_GAP,
     MAX_SEND_SPACING,
     MIN_VERIFY_DELAY,
@@ -131,6 +133,9 @@ class ShadeAutoOptionsFlow(OptionsFlowWithReload):
                     SelectSelectorConfig(
                         options=list(TILT_MODES), translation_key=CONF_TILT_MODE, mode=SelectSelectorMode.DROPDOWN
                     )
+                ),
+                vol.Optional(CONF_DRAPE_VANE_END_STOP, default=current.drape_vane_end_stop): NumberSelector(
+                    NumberSelectorConfig(min=0, max=MAX_DRAPE_VANE_END_STOP, step=1, mode=NumberSelectorMode.BOX)
                 ),
                 vol.Optional(CONF_COLLISION_GUARD, default=current.collision_guard): BooleanSelector(),
                 vol.Optional(CONF_RAIL_MIN_GAP, default=current.rail_min_gap): NumberSelector(

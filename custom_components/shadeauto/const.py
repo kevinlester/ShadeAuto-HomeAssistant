@@ -51,6 +51,7 @@ CONF_TILT_MODE = "tilt_mode"
 CONF_COLLISION_GUARD = "collision_guard"
 CONF_RAIL_MIN_GAP = "rail_min_gap"
 CONF_PUSH_ENABLED = "push_enabled"
+CONF_DRAPE_VANE_END_STOP = "drape_vane_end_stop"
 # 0.4.x stored a bool here; it is only read to migrate to CONF_TILT_MODE.
 CONF_TILT_ENABLED = "tilt_enabled"
 
@@ -100,6 +101,17 @@ MAX_RAIL_MIN_GAP = 50  # PR #9's form range
 # STATUS_REPORT_WAIT_SEC). Polling runs either way, because the stream does
 # not replay what it missed while down.
 DEFAULT_PUSH_ENABLED = False  # opt-in until the stream has more hours on real hubs
+# Where a SmartDrape's vanes stop when told to close while the drape is open,
+# on the hub's scale. 0 shows the hub's value as it is. Three drapes
+# (ModuleType 80/1, firmware 0.2.3, tested by rtm) sent 0 and 100 land at 17
+# and 83 whenever the drape is drawn open at all, and reach 0 and 100 only
+# with the drape fully closed. A user who sets this to 17 sees the open
+# drape's range 17-83 as tilt 0-100: closing the vanes then reads back as 0,
+# not 17, and closing the drape takes vanes at the stop fully shut. At a draw
+# of 0 the hub's scale is used unchanged. The mapping is symmetric about 50,
+# so open stays 50 on both scales. At most 49: 50 would leave no range at all.
+DEFAULT_DRAPE_VANE_END_STOP = 0
+MAX_DRAPE_VANE_END_STOP = 49
 
 # --- Hub field names ---------------------------------------------------------
 ATTR_PERIPHERAL_UID = "PeripheralUID"
@@ -144,7 +156,17 @@ AXIS_FIELDS = {
 PROFILE_SHEER = "sheer"  # bottom rail = lift, middle rail = vane tilt honoured only at bottom 0
 PROFILE_SINGLE_RAIL = "single_rail"  # bottom rail only; the middle rail always reads 0
 PROFILE_TWO_RAIL = "two_rail"  # two independent rail heights (top-down/bottom-up, day/night)
+PROFILE_DRAPE = "drape"  # bottom rail = how far the drape is drawn, middle rail = vane tilt on the hub's scale
 PROFILE_LEGACY = "legacy"  # no verified behaviour; handled like single_rail, as 0.3.0 did
+
+# A SmartDrape's vanes on the hub's scale: 0 and 100 are closed in opposite
+# directions, 50 is open (kedube/ha-norman "Cover types"; upstream PR #7, whose
+# tilt was tested on three SmartDrapes). Exposed to Home Assistant on that
+# scale, unless DRAPE_VANE_END_STOP re-maps the reachable range; 50 is open on
+# both, so open_cover_tilt always sends 50 and close_cover_tilt sends the end
+# stop (0 by default).
+DRAPE_TILT_OPEN = 50
+DRAPE_TILT_CLOSED = 0
 
 # Exact pairs, checked before PROFILE_BY_MODULE_TYPE.
 PROFILE_BY_MODULE: dict[tuple[int, int], str] = {
@@ -174,21 +196,36 @@ PROFILE_BY_MODULE_TYPE: dict[int, str] = {
     # height on the same 0-100 axis as the bottom rail (upstream PR #9, on one
     # real type-33 shade of unreported detail; kedube on 33/3).
     33: PROFILE_TWO_RAIL,
+    # SmartDrape: the bottom rail is how far the drape is drawn and the middle
+    # rail is the vanes, in stops on the hub's 0-100 scale (kedube, "Cover
+    # types", from one user's 80/1). Upstream PR #7 drove exactly that pair of
+    # fields; the drape profile is what PR #7 did, on top of 0.6.0, and was
+    # tested by rtm on three 80/1 drapes (firmware 0.2.3): tilt, draw, stop
+    # and the vanes restated through a draw all behaved as designed.
+    80: PROFILE_DRAPE,
 }
 # Families the vendor app knows that have no verified behaviour here
-# (SmartDrape: vanes in seven stops; Shutter: louvers as Position 0-7, no rails;
-# kedube, "Cover types"). They get the legacy profile without a warning.
-KNOWN_UNSUPPORTED_MODULE_TYPES: dict[int, str] = {1: "Shutter", 80: "SmartDrape"}
+# (Shutter: louvers as Position 0-7, no rails; kedube, "Cover types"). They get
+# the legacy profile without a warning.
+KNOWN_UNSUPPORTED_MODULE_TYPES: dict[int, str] = {1: "Shutter"}
 # The Top cover of a two-rail shade is the main cover's unique id plus this:
 # upstream PR #9 (alexfgoldberg's fork) used it, so its users keep the entity.
 TOP_COVER_UNIQUE_ID_SUFFIX = "_middle"
 # Axes the coordinator tracks (pending targets, motion, fast polling, verify).
 # Single-rail and legacy shades track the bottom rail only, so a middle target
-# the hub never reaches (the stuck 100 above) cannot keep them "moving".
+# the hub never reaches (the stuck 100 above) cannot keep them "moving". A
+# drape tracks the bottom rail only as well: with the drape open the hub holds
+# the vanes to 17-83 and rewrites the vane *target* to match as a draw
+# finishes (rtm's hub log), so a vane target of 0 sent with a draw is never
+# reached and a tracked vane axis would make verify re-send every draw. The
+# tilt attribute still follows what the hub reports, and the coordinator keeps
+# polling fast for UNTRACKED_SETTLE_SEC after a command that changes an
+# untracked axis, so that report is not left to the idle poll.
 PROFILE_AXES: dict[str, tuple[str, ...]] = {
     PROFILE_SHEER: AXES,
     PROFILE_TWO_RAIL: AXES,
     PROFILE_SINGLE_RAIL: (AXIS_BOTTOM,),
+    PROFILE_DRAPE: (AXIS_BOTTOM,),
     PROFILE_LEGACY: (AXIS_BOTTOM,),
 }
 
@@ -196,6 +233,13 @@ PROFILE_AXES: dict[str, tuple[str, ...]] = {
 POSITION_TOLERANCE = 2  # a hub position this close to the target counts as "arrived"
 PENDING_GRACE_SEC = 10.0  # how long a just-sent command counts as moving before the hub must reflect its target
 MOTION_FAILSAFE_SEC = 120.0  # a shade whose target != actual for this long with no change is treated as stalled
+# How long polling stays fast after a command that changes an axis the
+# shade's profile does not track (a drape's vanes): the hub reports an end
+# state 10-35 s after a command, and a drape's vane move takes about 12 s
+# (rtm's test). The window ends early when the hub reports the axis at the
+# commanded value, or anywhere else than where it was: the hub reports only
+# end states, so any change is the move finishing.
+UNTRACKED_SETTLE_SEC = 35.0
 # Cooldown of the coordinator's refresh requests (the stream's events). Home
 # Assistant's default is 10 s, which would hold back a "move finished" event
 # that arrives soon after another one (a shade's two events, or two shades in

@@ -17,11 +17,16 @@ from homeassistant.components.cover import (
     ATTR_CURRENT_POSITION,
     ATTR_CURRENT_TILT_POSITION,
     ATTR_POSITION,
+    ATTR_TILT_POSITION,
     DOMAIN as COVER_DOMAIN,
     SERVICE_CLOSE_COVER,
+    SERVICE_CLOSE_COVER_TILT,
     SERVICE_OPEN_COVER,
+    SERVICE_OPEN_COVER_TILT,
     SERVICE_SET_COVER_POSITION,
+    SERVICE_SET_COVER_TILT_POSITION,
     SERVICE_STOP_COVER,
+    SERVICE_STOP_COVER_TILT,
     CoverState,
 )
 from homeassistant.const import ATTR_DEVICE_CLASS, ATTR_ENTITY_ID, ATTR_SUPPORTED_FEATURES
@@ -38,19 +43,27 @@ from custom_components.shadeauto.const import (
     DEFAULT_POLL,
     MIN_VERIFY_DELAY,
     MOTION_FAILSAFE_SEC,
+    PROFILE_DRAPE,
     PROFILE_LEGACY,
     PROFILE_SHEER,
     PROFILE_SINGLE_RAIL,
     PROFILE_TWO_RAIL,
     STATUS_REPORT_WAIT_SEC,
+    UNTRACKED_SETTLE_SEC,
 )
 from custom_components.shadeauto.coordinator import ShadeAutoCoordinator, shade_profile
-from custom_components.shadeauto.cover import plan_rail_move
+from custom_components.shadeauto.cover import (
+    drape_tilt_to_ha,
+    drape_tilt_to_hub,
+    drape_vanes_for_draw,
+    plan_rail_move,
+)
 
 from .conftest import (
     ALL_UIDS,
     BOTTOM,
     COVER,
+    DRAPE,
     KITCHEN,
     MIDDLE,
     MOTOR_STOP,
@@ -82,6 +95,8 @@ DEN_COVER = "cover.den"
 PATIO = 50001  # two-rail, resting with the bottom rail at 20 and the top rail at 60
 PATIO_COVER = "cover.patio"
 PATIO_TOP = "cover.patio_top"
+LOUNGE = 80001  # a SmartDrape, drawn to 30 with its vanes open (50)
+LOUNGE_COVER = "cover.lounge"
 
 
 async def _call(hass: HomeAssistant, service: str, entity_id: str, **data: int) -> None:
@@ -118,6 +133,10 @@ def _add_patio(hub: FakeHub) -> None:
     hub.add_shade(PATIO, "Patio", 33, 3, bottom=20, middle=60)
 
 
+def _add_lounge(hub: FakeHub) -> None:
+    hub.add_shade(LOUNGE, "Lounge", 80, 1, bottom=30, middle=50)
+
+
 # --- the profile table ------------------------------------------------------------
 
 
@@ -146,8 +165,11 @@ def _add_patio(hub: FakeHub) -> None:
         (32, 3, PROFILE_TWO_RAIL),
         (32, 4, PROFILE_TWO_RAIL),
         (32, 5, PROFILE_TWO_RAIL),
+        # SmartDrape: the draw plus vanes on the middle rail, whatever the detail.
+        (80, 1, PROFILE_DRAPE),
+        (80, 0, PROFILE_DRAPE),
+        (80, None, PROFILE_DRAPE),
         # Known families without verified behaviour, and pairs nobody has reported.
-        (80, 1, PROFILE_LEGACY),
         (1, 0, PROFILE_LEGACY),
         (99, 7, PROFILE_LEGACY),
         (None, None, PROFILE_LEGACY),
@@ -162,7 +184,9 @@ def test_profile_table(module_type: int | None, module_detail: int | None, profi
     assert shade_profile(module_type, module_detail) == profile
     if module_type is not None and module_detail is not None:
         # The fake hub's model of each family agrees with the integration's table.
-        expected_family = {PROFILE_SHEER: SHEER, PROFILE_TWO_RAIL: TWO_RAIL}.get(profile, SINGLE_RAIL)
+        expected_family = {PROFILE_SHEER: SHEER, PROFILE_TWO_RAIL: TWO_RAIL, PROFILE_DRAPE: DRAPE}.get(
+            profile, SINGLE_RAIL
+        )
         assert hub_family(module_type, module_detail) == expected_family
 
 
@@ -200,7 +224,7 @@ async def test_module_pair_missing_from_the_peripheral_list_is_taken_from_status
 
 @pytest.mark.parametrize(
     ("module_type", "module_detail"),
-    [(48, 1), (48, 2), (49, 1), (32, 0), (32, 2), (80, 1), (1, 0), (99, 7)],
+    [(48, 1), (48, 2), (49, 1), (32, 0), (32, 2), (1, 0), (99, 7)],
 )
 async def test_single_rail_and_legacy_shades_are_lift_only_with_bottom_only_commands(
     hass: HomeAssistant, hub: FakeHub, module_type: int, module_detail: int
@@ -227,7 +251,7 @@ async def test_single_rail_and_legacy_shades_are_lift_only_with_bottom_only_comm
 
 @pytest.mark.parametrize(
     ("module_type", "module_detail"),
-    [(48, 1), (80, 1), (99, 7)],  # a roller, a SmartDrape and an unknown pair: single_rail and legacy alike
+    [(48, 1), (1, 0), (99, 7)],  # a roller, a shutter and an unknown pair: single_rail and legacy alike
 )
 async def test_a_stuck_middle_target_neither_keeps_a_single_rail_shade_moving_nor_triggers_a_retry(
     hass: HomeAssistant, hub: FakeHub, freezer: FrozenDateTimeFactory, module_type: int, module_detail: int
@@ -283,7 +307,6 @@ async def test_unrecognised_module_pair_is_warned_about_once(
     """One warning per unknown pair, naming its shades; known-but-unsupported families only log at debug."""
     hub.add_shade(60001, "Mystery One", 99, 7)
     hub.add_shade(60002, "Mystery Two", 99, 7)
-    hub.add_shade(60003, "Drape", 80, 1)
     hub.add_shade(60004, "Louvres", 1, 0)
     caplog.set_level(logging.DEBUG, logger="custom_components.shadeauto")
     entry = await _setup(hass)
@@ -297,11 +320,10 @@ async def test_unrecognised_module_pair_is_warned_about_once(
     assert "Mystery One" in message
     assert "Mystery Two" in message
     debug = "\n".join(r.getMessage() for r in caplog.records if r.levelno == logging.DEBUG)
-    assert "Drape (SmartDrape, ModuleType 80 / ModuleDetail 1)" in debug
     assert "Louvres (Shutter, ModuleType 1 / ModuleDetail 0)" in debug
 
     coordinator = _coordinator(entry)
-    for uid in (60001, 60002, 60003, 60004):
+    for uid in (60001, 60002, 60004):
         assert coordinator.peripherals[str(uid)].profile == PROFILE_LEGACY
 
 
@@ -678,9 +700,10 @@ async def test_tilt_mode_off_removes_tilt_but_keeps_the_vanes(hass: HomeAssistan
     assert hub.position(KITCHEN, MIDDLE) == 50
 
 
-async def test_tilt_mode_auto_gives_tilt_to_sheer_shades_only(hass: HomeAssistant, hub: FakeHub) -> None:
+async def test_tilt_mode_auto_gives_tilt_to_sheer_shades_and_drapes_only(hass: HomeAssistant, hub: FakeHub) -> None:
     hub.add_shade(DEN, "Den", 48, 1, bottom=100)
     _add_patio(hub)
+    _add_lounge(hub)
     hub.add_shade(70001, "Studio", 49, 3, bottom=0, middle=40)
     await _setup(hass, {"tilt_mode": "auto"})
 
@@ -688,5 +711,388 @@ async def test_tilt_mode_auto_gives_tilt_to_sheer_shades_only(hass: HomeAssistan
     studio = hass.states.get("cover.studio")
     assert studio.attributes[ATTR_SUPPORTED_FEATURES] == ALL_FEATURES
     assert studio.attributes[ATTR_CURRENT_TILT_POSITION] == 40
+    lounge = hass.states.get(LOUNGE_COVER)
+    assert lounge.attributes[ATTR_SUPPORTED_FEATURES] == ALL_FEATURES
+    assert lounge.attributes[ATTR_CURRENT_TILT_POSITION] == 50
     for entity_id in (DEN_COVER, PATIO_COVER, PATIO_TOP):
         assert hass.states.get(entity_id).attributes[ATTR_SUPPORTED_FEATURES] == LIFT_ONLY_FEATURES
+
+
+# --- drapes ----------------------------------------------------------------------
+
+
+async def test_drape_gets_one_cover_with_lift_and_tilt_on_the_hub_scale(hass: HomeAssistant, hub: FakeHub) -> None:
+    """A SmartDrape: the draw as the position, the vanes as the hub reports them (50 = open), model named."""
+    _add_lounge(hub)
+    entry = await _setup(hass)
+    registry = er.async_get(hass)
+
+    assert _coordinator(entry).peripherals[str(LOUNGE)].profile == PROFILE_DRAPE
+    assert registry.async_get(LOUNGE_COVER).unique_id == f"shadeauto_{hub.thing_name}_{LOUNGE}"
+    state = hass.states.get(LOUNGE_COVER)
+    assert state.state == CoverState.OPEN
+    assert state.attributes[ATTR_SUPPORTED_FEATURES] == ALL_FEATURES
+    assert state.attributes[ATTR_CURRENT_POSITION] == 30
+    assert state.attributes[ATTR_CURRENT_TILT_POSITION] == 50
+    assert state.attributes["friendly_name"] == "Lounge"
+    device = dr.async_get(hass).async_get(registry.async_get(LOUNGE_COVER).device_id)
+    assert device.model == "SmartDrape (type 80/1)"
+    # One cover, one battery sensor and one low-battery sensor, like any other single-cover shade.
+    assert len(er.async_entries_for_config_entry(registry, entry.entry_id)) == 3 * len(ALL_UIDS) + 3
+
+
+async def test_every_drape_draw_restates_the_vanes_the_hub_reports(
+    hass: HomeAssistant, hub: FakeHub, freezer: FrozenDateTimeFactory
+) -> None:
+    """A bottom-only command would close the vanes (hub rule), so each draw carries the reported vane position."""
+    _add_lounge(hub)
+    await _setup(hass)
+
+    await _call(hass, SERVICE_SET_COVER_POSITION, LOUNGE_COVER, **{ATTR_POSITION: 70})
+    await _call(hass, SERVICE_CLOSE_COVER, LOUNGE_COVER)
+    hub.external_move(LOUNGE, middle=17)  # the hub held the vanes to 17 as the draw finished (rtm)
+    await _poll(hass, freezer, DEFAULT_POLL + 1)  # the idle poll picks it up
+    await _call(hass, SERVICE_OPEN_COVER, LOUNGE_COVER)
+
+    assert [_rails(cmd) for cmd in _commands_for(hub, LOUNGE)] == [(70, 50), (0, 50), (100, 17)]
+    state = hass.states.get(LOUNGE_COVER)
+    assert state.attributes[ATTR_CURRENT_POSITION] == 100
+    assert state.attributes[ATTR_CURRENT_TILT_POSITION] == 17
+
+
+async def test_drape_tilt_commands_restate_the_draw_and_use_the_hub_scale(hass: HomeAssistant, hub: FakeHub) -> None:
+    """Open tilt is 50 and close tilt is 0 on the hub's scale; the drape is held where it is, never lowered first."""
+    _add_lounge(hub)
+    await _setup(hass)
+
+    await _call(hass, SERVICE_SET_COVER_TILT_POSITION, LOUNGE_COVER, **{ATTR_TILT_POSITION: 83})
+    await _call(hass, SERVICE_CLOSE_COVER_TILT, LOUNGE_COVER)
+    await _call(hass, SERVICE_OPEN_COVER_TILT, LOUNGE_COVER)
+    await _call(hass, SERVICE_SET_COVER_POSITION, LOUNGE_COVER, **{ATTR_POSITION: 60})
+    await _call(hass, SERVICE_SET_COVER_TILT_POSITION, LOUNGE_COVER, **{ATTR_TILT_POSITION: 100})
+
+    assert [_rails(cmd) for cmd in _commands_for(hub, LOUNGE)] == [(30, 83), (30, 0), (30, 50), (60, 50), (60, 100)]
+    state = hass.states.get(LOUNGE_COVER)
+    assert state.attributes[ATTR_CURRENT_POSITION] == 60
+    assert state.attributes[ATTR_CURRENT_TILT_POSITION] == 100
+
+
+async def test_drape_tilt_while_the_drape_is_moving_restates_where_it_is_heading(
+    hass: HomeAssistant, hub: FakeHub
+) -> None:
+    _add_lounge(hub)
+    await _setup(hass)
+    hub.stuck = True
+
+    await _call(hass, SERVICE_OPEN_COVER, LOUNGE_COVER)  # (100, 50), under way
+    assert hass.states.get(LOUNGE_COVER).state == CoverState.OPENING
+    await _call(hass, SERVICE_CLOSE_COVER_TILT, LOUNGE_COVER)
+    assert _rails(_commands_for(hub, LOUNGE)[-1]) == (100, 0)  # not the stale 30
+    assert hass.states.get(LOUNGE_COVER).state == CoverState.OPENING  # the draw is still on its way
+
+
+async def test_drape_stop_and_tilt_stop_both_stop_the_motor(hass: HomeAssistant, hub: FakeHub) -> None:
+    _add_lounge(hub)
+    await _setup(hass)
+    await _call(hass, SERVICE_STOP_COVER, LOUNGE_COVER)
+    await _call(hass, SERVICE_STOP_COVER_TILT, LOUNGE_COVER)
+    assert [cmd.get(MOTOR_STOP) for cmd in _commands_for(hub, LOUNGE)] == [170, 170]
+
+
+async def test_drape_motion_and_verify_follow_the_draw_only(
+    hass: HomeAssistant, hub: FakeHub, freezer: FrozenDateTimeFactory
+) -> None:
+    """The hub rewrites the vane target to 17 as a draw finishes (rtm); that must not keep the drape moving or retry."""
+    _add_lounge(hub)
+    entry = await _setup(hass, VERIFY_OPTIONS)
+    coordinator = _coordinator(entry)
+    hub.settle_after_polls = 2  # the command's own refresh is the first poll
+
+    await _call(hass, SERVICE_SET_COVER_POSITION, LOUNGE_COVER, **{ATTR_POSITION: 80})  # (80, 50)
+    assert coordinator.update_interval == MOTION
+    assert not coordinator.is_moving(str(LOUNGE), AXIS_MIDDLE)  # the vane axis is not tracked
+    await _poll(hass, freezer, MOTION_TICK)  # the draw arrives
+    assert coordinator.update_interval == IDLE
+    hub.external_move(LOUNGE, middle=17)  # ...and the motor left the vanes at 17, not the 50 we restated
+    await _poll(hass, freezer, DEFAULT_POLL + 1)
+    assert coordinator.update_interval == IDLE
+    assert hass.states.get(LOUNGE_COVER).state == CoverState.OPEN
+    assert hass.states.get(LOUNGE_COVER).attributes[ATTR_CURRENT_TILT_POSITION] == 17
+
+    await _poll(hass, freezer, VERIFY_TICK)
+    await _poll(hass, freezer, REPORT_TICK)
+    assert len(_commands_for(hub, LOUNGE)) == 1  # the draw arrived; the vanes are not verified
+
+
+async def test_drape_verify_retries_a_lost_draw_with_the_vanes_restated(
+    hass: HomeAssistant, hub: FakeHub, freezer: FrozenDateTimeFactory
+) -> None:
+    _add_lounge(hub)
+    await _setup(hass, VERIFY_OPTIONS)
+    hub.stuck = True
+
+    await _call(hass, SERVICE_CLOSE_COVER, LOUNGE_COVER)
+    await _poll(hass, freezer, VERIFY_TICK)
+    await _poll(hass, freezer, REPORT_TICK)
+
+    commands = _commands_for(hub, LOUNGE)
+    assert [is_status_request(cmd) for cmd in commands] == [False, True, False]
+    assert _rails(commands[2]) == (0, 50)
+
+
+async def test_drape_tilt_mode_off_hides_tilt_but_still_restates_the_vanes(hass: HomeAssistant, hub: FakeHub) -> None:
+    _add_lounge(hub)
+    await _setup(hass, {"tilt_mode": "off"})
+
+    state = hass.states.get(LOUNGE_COVER)
+    assert state.attributes[ATTR_SUPPORTED_FEATURES] == LIFT_ONLY_FEATURES
+    assert ATTR_CURRENT_TILT_POSITION not in state.attributes
+
+    await _call(hass, SERVICE_OPEN_COVER, LOUNGE_COVER)
+    assert _rails(hub.commands[-1]) == (100, 50)
+
+
+async def test_drape_tilt_keeps_polling_fast_until_the_hub_reports_the_vanes(
+    hass: HomeAssistant, hub: FakeHub, freezer: FrozenDateTimeFactory
+) -> None:
+    """A tilt carries no pending target (the vane axis is not tracked); the settle window keeps the polls fast instead.
+
+    rtm saw ``current_tilt_position`` trail a tilt by up to the 30 s idle
+    poll while the draw updated within seconds.
+    """
+    _add_lounge(hub)
+    entry = await _setup(hass)
+    coordinator = _coordinator(entry)
+    hub.settle_after_polls = 3  # the command's own refresh is the first poll
+
+    await _call(hass, SERVICE_CLOSE_COVER_TILT, LOUNGE_COVER)  # (30, 0)
+    assert coordinator.update_interval == MOTION
+    state = hass.states.get(LOUNGE_COVER)
+    assert state.state == CoverState.OPEN  # the draw is held where it is; no motion flag for the vanes
+    assert state.attributes[ATTR_CURRENT_TILT_POSITION] == 50
+    await _poll(hass, freezer, MOTION_TICK)
+    assert coordinator.update_interval == MOTION
+    await _poll(hass, freezer, MOTION_TICK)  # the hub reports the vanes
+    assert hass.states.get(LOUNGE_COVER).attributes[ATTR_CURRENT_TILT_POSITION] == 0
+    assert coordinator.update_interval == IDLE
+
+    await _call(hass, SERVICE_CLOSE_COVER_TILT, LOUNGE_COVER)  # already at 0: nothing to wait for
+    assert coordinator.update_interval == IDLE
+
+
+async def test_drape_vanes_landing_short_of_the_target_still_end_the_fast_polling(
+    hass: HomeAssistant, hub: FakeHub, freezer: FrozenDateTimeFactory
+) -> None:
+    """Sent 0, rtm's drapes report 17: the hub reports end states only, so any change on the axis is the move's end."""
+    _add_lounge(hub)
+    entry = await _setup(hass)
+    coordinator = _coordinator(entry)
+    hub.stuck = True
+
+    await _call(hass, SERVICE_CLOSE_COVER_TILT, LOUNGE_COVER)
+    await _poll(hass, freezer, MOTION_TICK)
+    assert coordinator.update_interval == MOTION
+    hub.external_move(LOUNGE, middle=17)
+    await _poll(hass, freezer, MOTION_TICK)
+    assert hass.states.get(LOUNGE_COVER).attributes[ATTR_CURRENT_TILT_POSITION] == 17
+    assert coordinator.update_interval == IDLE
+
+
+async def test_drape_tilt_the_hub_never_reports_ends_the_fast_polling_after_the_window(
+    hass: HomeAssistant, hub: FakeHub, freezer: FrozenDateTimeFactory
+) -> None:
+    _add_lounge(hub)
+    entry = await _setup(hass)
+    coordinator = _coordinator(entry)
+    hub.stuck = True
+
+    await _call(hass, SERVICE_SET_COVER_TILT_POSITION, LOUNGE_COVER, **{ATTR_TILT_POSITION: 83})
+    assert coordinator.update_interval == MOTION
+    await _poll(hass, freezer, UNTRACKED_SETTLE_SEC + 1)
+    assert coordinator.update_interval == IDLE
+    assert hass.states.get(LOUNGE_COVER).attributes[ATTR_CURRENT_TILT_POSITION] == 50
+
+
+async def test_drape_stop_during_a_tilt_ends_the_fast_polling(hass: HomeAssistant, hub: FakeHub) -> None:
+    _add_lounge(hub)
+    entry = await _setup(hass)
+    coordinator = _coordinator(entry)
+    hub.stuck = True
+
+    await _call(hass, SERVICE_CLOSE_COVER_TILT, LOUNGE_COVER)
+    assert coordinator.update_interval == MOTION
+    await _call(hass, SERVICE_STOP_COVER_TILT, LOUNGE_COVER)
+    assert coordinator.update_interval == IDLE
+
+
+@pytest.mark.parametrize(
+    ("vanes", "end_stop", "tilt"),
+    [
+        # No end stop: the hub's value as it is.
+        (0, 0, 0),
+        (17, 0, 17),
+        (50, 0, 50),
+        (100, 0, 100),
+        # End stop 17 (rtm's drapes): 17-83 reads as 0-100, 50 stays 50, the hub's other stops fall where they fall.
+        (17, 17, 0),
+        (33, 17, 24),
+        (50, 17, 50),
+        (66, 17, 74),
+        (83, 17, 100),
+        # Outside the reachable range: clamped, not extrapolated.
+        (0, 17, 0),
+        (100, 17, 100),
+        # A landing within POSITION_TOLERANCE of a stop is the stop (rtm's drape settled at 82 for 83).
+        (19, 17, 0),
+        (82, 17, 100),
+        (20, 17, 5),
+        # The largest end stop still leaves a range.
+        (49, 49, 0),
+        (50, 49, 50),
+        (51, 49, 100),
+    ],
+)
+def test_drape_tilt_shown_for_the_hubs_vane_value(vanes: int, end_stop: int, tilt: int) -> None:
+    assert drape_tilt_to_ha(vanes, end_stop) == tilt
+
+
+@pytest.mark.parametrize(
+    ("vanes", "from_draw", "to_draw", "end_stop", "expected"),
+    [
+        # Closing an open drape takes vanes at a stop (or within tolerance of it) fully shut; the rest stay put.
+        (17, 50, 0, 17, 0),
+        (19, 50, 0, 17, 0),
+        (83, 50, 0, 17, 100),
+        (82, 50, 0, 17, 100),
+        (20, 50, 0, 17, 20),
+        (33, 50, 0, 17, 33),
+        (50, 50, 0, 17, 50),
+        # Not a close, not from open, draw unknown, or no end stop: the hub's value as it is.
+        (17, 50, 40, 17, 17),
+        (17, 0, 0, 17, 17),
+        (17, None, 0, 17, 17),
+        (17, 50, 0, 0, 17),
+    ],
+)
+def test_drape_vanes_restated_by_a_draw(
+    vanes: int, from_draw: int | None, to_draw: int, end_stop: int, expected: int
+) -> None:
+    assert drape_vanes_for_draw(vanes, from_draw=from_draw, to_draw=to_draw, end_stop=end_stop) == expected
+
+
+@pytest.mark.parametrize(
+    ("tilt", "end_stop", "vanes"),
+    [
+        (0, 0, 0),
+        (50, 0, 50),
+        (100, 0, 100),
+        (250, 0, 100),
+        (0, 17, 17),
+        (25, 17, 33),
+        (50, 17, 50),
+        (75, 17, 67),
+        (100, 17, 83),
+        (-5, 17, 17),
+        (0, 49, 49),
+        (100, 49, 51),
+    ],
+)
+def test_drape_tilt_sent_for_home_assistants_value(tilt: int, end_stop: int, vanes: int) -> None:
+    assert drape_tilt_to_hub(tilt, end_stop) == vanes
+
+
+async def test_drape_vane_end_stop_maps_the_reachable_range_onto_0_to_100(
+    hass: HomeAssistant, hub: FakeHub, freezer: FrozenDateTimeFactory
+) -> None:
+    """With the end stop at 17, close tilt sends 17 and reads back 0; the vanes a draw restates stay hub values."""
+    _add_lounge(hub)
+    await _setup(hass, {"drape_vane_end_stop": 17})
+    assert hass.states.get(LOUNGE_COVER).attributes[ATTR_CURRENT_TILT_POSITION] == 50
+
+    await _call(hass, SERVICE_CLOSE_COVER_TILT, LOUNGE_COVER)
+    assert hass.states.get(LOUNGE_COVER).attributes[ATTR_CURRENT_TILT_POSITION] == 0
+    await _call(hass, SERVICE_SET_COVER_POSITION, LOUNGE_COVER, **{ATTR_POSITION: 60})  # restates 17 as 17
+    await _call(hass, SERVICE_SET_COVER_TILT_POSITION, LOUNGE_COVER, **{ATTR_TILT_POSITION: 100})
+    assert hass.states.get(LOUNGE_COVER).attributes[ATTR_CURRENT_TILT_POSITION] == 100
+    await _call(hass, SERVICE_SET_COVER_TILT_POSITION, LOUNGE_COVER, **{ATTR_TILT_POSITION: 25})
+    assert hass.states.get(LOUNGE_COVER).attributes[ATTR_CURRENT_TILT_POSITION] == 24  # the hub's stop at 33
+    await _call(hass, SERVICE_OPEN_COVER_TILT, LOUNGE_COVER)
+    assert hass.states.get(LOUNGE_COVER).attributes[ATTR_CURRENT_TILT_POSITION] == 50
+
+    assert [_rails(cmd) for cmd in _commands_for(hub, LOUNGE)] == [(30, 17), (60, 17), (60, 83), (60, 33), (60, 50)]
+
+    hub.external_move(LOUNGE, middle=0)  # the app sent the hub's own 0: shown as closed, not below it
+    await _poll(hass, freezer, DEFAULT_POLL + 1)
+    assert hass.states.get(LOUNGE_COVER).attributes[ATTR_CURRENT_TILT_POSITION] == 0
+
+
+async def test_drape_vane_end_stop_does_not_apply_while_the_drape_is_fully_closed(
+    hass: HomeAssistant, hub: FakeHub, freezer: FrozenDateTimeFactory
+) -> None:
+    """At a draw of 0 the vanes reach 0 and 100 (rtm), so the hub's scale is shown and sent as it is there."""
+    hub.add_shade(LOUNGE, "Lounge", 80, 1, bottom=0, middle=17)  # closed, vanes where an open drape left them
+    await _setup(hass, {"drape_vane_end_stop": 17})
+    assert hass.states.get(LOUNGE_COVER).attributes[ATTR_CURRENT_TILT_POSITION] == 17
+
+    await _call(hass, SERVICE_CLOSE_COVER_TILT, LOUNGE_COVER)
+    assert hass.states.get(LOUNGE_COVER).attributes[ATTR_CURRENT_TILT_POSITION] == 0
+    await _call(hass, SERVICE_SET_COVER_TILT_POSITION, LOUNGE_COVER, **{ATTR_TILT_POSITION: 33})
+    assert hass.states.get(LOUNGE_COVER).attributes[ATTR_CURRENT_TILT_POSITION] == 33
+    await _call(hass, SERVICE_SET_COVER_TILT_POSITION, LOUNGE_COVER, **{ATTR_TILT_POSITION: 100})
+    assert hass.states.get(LOUNGE_COVER).attributes[ATTR_CURRENT_TILT_POSITION] == 100
+    await _call(hass, SERVICE_CLOSE_COVER, LOUNGE_COVER)  # already closed: the vanes are restated as they are
+    assert [_rails(cmd) for cmd in _commands_for(hub, LOUNGE)] == [(0, 0), (0, 33), (0, 100), (0, 100)]
+
+    # The attribute follows the draw the hub reports: the same 17 reads 0 once the drape is open.
+    hub.external_move(LOUNGE, bottom=50, middle=17)
+    await _poll(hass, freezer, DEFAULT_POLL + 1)
+    assert hass.states.get(LOUNGE_COVER).attributes[ATTR_CURRENT_TILT_POSITION] == 0
+    await _call(hass, SERVICE_CLOSE_COVER_TILT, LOUNGE_COVER)  # open: close tilt is the stop
+    assert _rails(hub.commands[-1]) == (50, 17)
+
+
+@pytest.mark.parametrize(
+    ("vanes", "sent"),
+    [(17, 0), (19, 0), (83, 100), (82, 100), (33, 33), (50, 50)],
+)
+async def test_closing_a_drape_with_the_end_stop_set_shuts_vanes_that_were_at_the_stop(
+    hass: HomeAssistant, hub: FakeHub, vanes: int, sent: int
+) -> None:
+    """rtm's evening close: with the option at 17, one close must leave the vanes at 0, not parked at 17."""
+    hub.add_shade(LOUNGE, "Lounge", 80, 1, bottom=50, middle=vanes)
+    await _setup(hass, {"drape_vane_end_stop": 17})
+
+    await _call(hass, SERVICE_CLOSE_COVER, LOUNGE_COVER)
+    assert _rails(hub.commands[-1]) == (0, sent)
+    state = hass.states.get(LOUNGE_COVER)
+    assert state.state == CoverState.CLOSED
+    assert state.attributes[ATTR_CURRENT_TILT_POSITION] == sent  # at draw 0 the hub's value is shown as it is
+
+    await _call(hass, SERVICE_SET_COVER_POSITION, LOUNGE_COVER, **{ATTR_POSITION: 40})  # a draw that is not a close
+    assert _rails(hub.commands[-1]) == (40, sent)
+
+
+async def test_closing_a_drape_without_the_end_stop_restates_the_vanes_as_before(
+    hass: HomeAssistant, hub: FakeHub
+) -> None:
+    """With the option at 0 (the default rtm approved) nothing about a close changes."""
+    hub.add_shade(LOUNGE, "Lounge", 80, 1, bottom=50, middle=17)
+    await _setup(hass)
+
+    await _call(hass, SERVICE_CLOSE_COVER, LOUNGE_COVER)
+    assert _rails(hub.commands[-1]) == (0, 17)
+    assert hass.states.get(LOUNGE_COVER).attributes[ATTR_CURRENT_TILT_POSITION] == 17
+
+
+async def test_drape_whose_hub_reports_no_vanes_is_drawn_with_the_0_3_0_payload(
+    hass: HomeAssistant, hub: FakeHub
+) -> None:
+    _add_lounge(hub)
+    hub.omit_fields = (MIDDLE, TARGET[MIDDLE])
+    await _setup(hass)
+
+    state = hass.states.get(LOUNGE_COVER)
+    assert state.attributes.get(ATTR_CURRENT_TILT_POSITION) is None
+    await _call(hass, SERVICE_SET_COVER_POSITION, LOUNGE_COVER, **{ATTR_POSITION: 10})
+    assert hub.commands[-1][BOTTOM] == 10
+    assert MIDDLE not in hub.commands[-1]

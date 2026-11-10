@@ -12,7 +12,7 @@ Control Norman **ShadeAuto** shades locally through the hub's undocumented HTTP 
   - One **Cover** entity per shade that supports the following:
     - open / close / stop
     - set position (0–100)
-    - tilt (open / close / set / stop) on PerfectSheer shades
+    - tilt (open / close / set / stop) on PerfectSheer shades and SmartDrapes
   - One **Top** cover for two-rail shades
   - **Battery (%)** sensor per shade
   - **Battery low** flag per shade.
@@ -32,7 +32,7 @@ Every shade gets one device with these entities (`<shade>` is the shade's name f
 | `sensor.<shade>_battery` | Battery level (diagnostic). | Percent. |
 | `binary_sensor.<shade>_battery_low` | Low-battery flag (diagnostic). | `on` below the threshold set in Options. |
 
-PerfectSheer shades add tilt to `cover.<shade>`: open, close, stop and set tilt, with the attribute `current_tilt_position`, 0 = vanes closed, 100 = vanes open.
+PerfectSheer shades add tilt to `cover.<shade>`: open, close, stop and set tilt, with the attribute `current_tilt_position`, 0 = vanes closed, 100 = vanes open. SmartDrapes add the same tilt controls on the hub's own scale: 0 and 100 = vanes closed in opposite directions, 50 = vanes open (see [SmartDrapes](#smartdrapes)).
 
 ## Supported shade types
 The hub reports every shade's type as a `ModuleType`/`ModuleDetail` pair; the device page shows it as the model (for example "PerfectSheer", or "Shade (type 33/3)"). Not all combinations of hardware have been tested. If you have success or failure with unverified hardware below, please let us know.
@@ -49,7 +49,7 @@ The hub reports every shade's type as a `ModuleType`/`ModuleDetail` pair; the de
 | Other products of those families | 32, 48 or 49 with any other detail | single-rail | Not seen anywhere; handled like the rest of the family, without a warning. |
 | Top-down/bottom-up or day/night cellular | 33/3 | two-rail | Real shades in kedube/ha-norman. This port has not been tested on hardware. |
 | Top-down/bottom-up cellular | 33/other, 32/3, 32/4, 32/5 | two-rail | The ShadeAuto app only (kedube/ha-norman). |
-| SmartDrape | 80/any | lift only | One user's diagnostics in kedube/ha-norman issue #2. The drape's vanes are not supported. |
+| SmartDrape | 80/any | draw + vane tilt | Three 80/1 drapes (firmware 0.2.3) on a real hub, tested by rtm: tilt, draw, stop and the vanes kept through a draw. The tilt follows [PR #7](https://github.com/kevinlester/ShadeAuto-HomeAssistant/pull/7). |
 | Shutter | 1/any | lift only | The ShadeAuto app only. Shutters have louvres instead of rails, which are not supported; the lift commands probably do nothing. |
 | Anything else | other types, or 32, 48 or 49 reported without a detail | lift only | A warning in the log asks you to report the type. Please open an issue with the pair and what the shade is. |
 
@@ -62,7 +62,18 @@ Sheer (PerfectSheer) shades can only tilt their vanes while the shade is **fully
 - Raising the shade to any height closes the vanes; lowering it fully (`close_cover` or position 0) keeps whatever vane setting it had.
 - `stop_cover` and `stop_cover_tilt` both stop the motor. Home Assistant stops showing the shade as opening or closing right away; the position it actually stopped at appears a couple of seconds after the hub reports it (about 35 s after the stop on the hubs seen so far). A shade stopped above the bottom ends with its vanes closed.
 
-Only PerfectSheer shades get tilt controls. To hide them on those too, set **Vane tilt** to **Off** in the integration's options; the commands sent stay the same, so this never closes anyone's vanes.
+Only PerfectSheer shades and SmartDrapes get tilt controls. To hide them on those too, set **Vane tilt** to **Off** in the integration's options; the commands sent stay the same, so this never closes anyone's vanes.
+
+## SmartDrapes
+A SmartDrape's cover is the draw: `current_position` 0 = drawn closed, 100 = fully open. Its vanes are the tilt, on the hub's own scale rather than Home Assistant's usual one: **0 and 100 are closed** (tilted fully in opposite directions) and **50 is open**. Open tilt sends 50 and close tilt sends 0; set the tilt position directly for anything in between. The hub reports the vanes in stops about 17 apart, so a value you set reads back as the nearest stop.
+
+**How far the vanes close depends on the draw.** With the drape fully closed (position 0) the vanes reach 0 and 100. With the drape open at all they stop short: on the three drapes tested, close tilt (0) lands at **17** and a tilt of 100 lands at **83**, the hub rewrites its own vane target to match, and the vendor app shows the same limit. So on an open drape `current_tilt_position` reads 17 after a close tilt. If you would rather see the open drape's range as 0 to 100, set **SmartDrapes: Min vane value when closed** to 17 in the [options](#options). On an open drape closed then reads 0 and 100, open stays 50, and the stops in between fall at 24 and 74; on a fully closed drape the hub's scale is used unchanged, so 0 is really 0. The number only changes how the tilt is shown and sent; the hub still moves the vanes to the same places.
+
+The vanes never close on their own when the drape returns to closed: they stay where the open drape left them until a tilt command moves them. With the option set, closing the drape takes vanes that were "closed" (at 17 or 83) fully shut in the same command, so one close shuts everything; with the option at 0, send a close tilt after the close, as rtm's evening automation does.
+
+Unlike PerfectSheer shades, a drape is never moved before a tilt: tilt commands leave the draw where it is. Every draw restates the vane position the hub last reported, so moving the drape does not close its vanes. Only the draw is tracked for "opening"/"closing" and for verify; after a tilt the integration keeps polling quickly until the hub reports the new vane position (about 12 s on the drapes tested), so `current_tilt_position` follows within seconds.
+
+Tested by rtm on three SmartDrapes (80/1, firmware 0.2.3) with Home Assistant 2026.9; please report how yours behaves, especially where its vanes stop.
 
 ## Two-rail shades (top-down/bottom-up, day/night)
 These shades have two rails that move independently, and each gets its own cover on the shade's device:
@@ -101,7 +112,8 @@ Settings → *Devices & Services* → **ShadeAuto** → **Configure**. Saving re
 | **Poll interval while idle** | 30 s | How often `/status` is read while nothing is moving. With push updates on, this is the safety net for anything the notifications miss. |
 | **Poll interval while a shade is moving** | 2 s | Faster polling during a move. The hub only reports a position once a move has finished. With push updates on, its notification usually brings that news first; this poll catches it when the stream is down. |
 | **Use the hub's change notifications (push updates)** | off | Listen to the hub's notification stream and read the hub's status as soon as it announces a change. Off: the stream is never opened and Home Assistant learns about changes by polling alone. Polling runs either way. It does not turn off verify's report-in request (see **Verify the shade arrived and retry once if not**), which then always waits the full 10 s. **Note**: off by default as a precaution. The stream holds a connection to the hub open for as long as the integration runs, and it has only been tested on a few hubs so far. If you turn it on, please report how it behaves, good or bad. |
-| **Vane tilt** | Automatic | **Automatic** shows tilt controls and `current_tilt_position` on PerfectSheer shades, the only ones with vanes; **Off** hides them everywhere. |
+| **Vane tilt** | Automatic | **Automatic** shows tilt controls and `current_tilt_position` on the shades with vanes, PerfectSheer and SmartDrape; **Off** hides them everywhere. |
+| **SmartDrapes: Min vane value when closed** | 0 | 0 shows a drape's vanes on the hub's own scale. While a drape is open its vanes stop short of 0 and 100; if closing them reads back as 17, enter 17: on an open drape the hub's 17 to 83 is then shown and set as 0 to 100, so closed reads 0 and 100 and open stays 50. A fully closed drape keeps the hub's scale, and closing the drape shuts vanes that were closed as far as it allowed. Up to 49. See [SmartDrapes](#smartdrapes). |
 | **Two-rail shades: keep the top rail at or above the bottom rail** | on | The collision guard described above. Turn it off only if it stops a position your shade can really reach. |
 | **Two-rail shades: minimum gap between the rails** | 0 % | Extra separation the guard keeps, 0–50 %. |
 | **Low battery threshold** | 20 % | Battery % at which the `*_battery_low` flag turns on. |
@@ -218,7 +230,7 @@ actions:
 - **No hub-wide report-ins.** The hub can ask every shade at once to report its position, which might correct positions it lost track of. The integration deliberately never does that: in [kedube/ha-norman](https://github.com/kedube/ha-norman) issue #5 a hub-wide report-in closed a user's roller shades with no move command sent. It only ever asks one shade at a time, and only before re-sending a command to that shade.
 - A shade renamed in the ShadeAuto app keeps its old name in Home Assistant until the integration is reloaded or Home Assistant restarts. The hub announces renames, but this release only re-reads positions when it does.
 - Vanes can be tilted only while the shade is fully lowered (a hub rule, see above).
-- Only PerfectSheer and roman 48/1 shades have been tested on real hardware. Two-rail and single-rail support follows other projects' findings (see [Supported shade types](#supported-shade-types)); SmartDrape vanes and shutter louvres are not supported.
+- Only PerfectSheer, roman 48/1 and SmartDrape shades have been tested on real hardware. Two-rail and single-rail support follows other projects' findings (see [Supported shade types](#supported-shade-types)); shutter louvres are not supported.
 - `stop_cover_tilt` is exposed, but stopping a shade in the middle of a vane-only move has not been tested separately. It is the same motor and the same stop command as `stop_cover`; what the hub reports for the vanes afterwards is unknown.
 - Battery is whatever the hub reports in `BatteryVoltage`, which is a percentage on the hubs seen so far.
 - The API is not official; behavior may change with hub firmware updates.

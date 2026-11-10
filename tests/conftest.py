@@ -68,6 +68,7 @@ HUB_WIDE_FIELDS = ("ReportBatteryLevel",)
 SHEER = "sheer"
 SINGLE_RAIL = "single_rail"
 TWO_RAIL = "two_rail"
+DRAPE = "drape"
 
 
 def hub_family(module_type: int, module_detail: int) -> str:
@@ -76,6 +77,8 @@ def hub_family(module_type: int, module_detail: int) -> str:
         return SHEER
     if module_type == 33 or (module_type == 32 and module_detail in (3, 4, 5)):
         return TWO_RAIL
+    if module_type == 80:
+        return DRAPE
     return SINGLE_RAIL
 
 
@@ -159,6 +162,12 @@ class FakeHub:
     * single-rail shades (and unknown pairs): only the bottom rail moves; the
       middle rail always reads 0 and its target stays whatever the test set
       (an app preset can leave it at 100) whatever is commanded;
+    * drapes (type 80): the bottom rail is the draw and the middle rail the
+      vanes on the hub's 0-100 scale, independent of each other like a two-rail
+      shade's rails (a command without ``MiddleRailPosition`` sets the vane
+      target to 0). The motor's vane reset during a draw, which PR #7 saw on
+      real drapes, is not modelled; tests simulate it with
+      :meth:`external_move`;
     * ``MotorStop`` stops the motor; the hub then reports nothing for ~35 s and
       finally sets ``BottomRailPosition`` and ``TargetBottomRailPosition`` to
       the stop point in one update, with a sheer shade's vanes and their target
@@ -420,7 +429,7 @@ class FakeHub:
         shade["Timestamp"] = _now()
         self.announce(uid)
         family = self.family(uid)
-        if family == TWO_RAIL:
+        if family in (TWO_RAIL, DRAPE):
             # Unverified for the middle rail; modelled as a rail that had not moved.
             shade[TARGET[MIDDLE]] = shade[MIDDLE]
         elif family == SINGLE_RAIL:

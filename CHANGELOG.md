@@ -3,7 +3,7 @@
 All notable changes to this integration are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [Unreleased]
+## [0.7.0] - 2026-11-10
 
 ### Added
 - SmartDrape (ModuleType 80) shades get vane tilt: a new `drape` profile

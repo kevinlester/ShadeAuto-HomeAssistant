@@ -5,7 +5,7 @@ from __future__ import annotations
 from homeassistant.const import Platform
 
 DOMAIN = "shadeauto"
-PLATFORMS: list[Platform] = [Platform.COVER, Platform.SENSOR, Platform.BINARY_SENSOR]
+PLATFORMS: list[Platform] = [Platform.COVER, Platform.SENSOR, Platform.BINARY_SENSOR, Platform.BUTTON]
 MANUFACTURER = "Norman (ShadeAuto)"
 
 # --- Config entry data -------------------------------------------------------
@@ -123,6 +123,22 @@ ATTR_BATTERY = "BatteryVoltage"  # despite the name, the hub reports a percentag
 ATTR_MOTOR_STOP = "MotorStop"
 ATTR_ERROR = "Error"
 MOTOR_STOP = 170  # the hub's "execute" value for action fields such as MotorStop
+# Jog the motor one small step (about one position unit) without changing the
+# hub's target. The vendor app's fine-tune taps, captured by kedube/ha-norman
+# on types 32/33; sent here to a 48/1 roman shade on 2026-11-10 and it moved
+# a little each time. The Identify button sends one each way.
+ATTR_MOTOR_JOG_UP = "MotorFineTuneToUp"
+ATTR_MOTOR_JOG_DOWN = "MotorFineTuneToDown"
+MOTOR_JOG = 170
+# An identify sends this many jogs one way, pauses, then as many back. One jog
+# was too small to spot across a room on a roman shade and three took too long
+# (Kevin, 2026-11-10/11); two is a clear twitch. Jogs are paced like any
+# command (send_spacing_sec), because the hub drops commands sent closer
+# together than about 1.3 s.
+IDENTIFY_TAPS = 2
+# Seconds between the last jog one way and the first jog back, so the twitch
+# reads as one gesture rather than a tremble.
+IDENTIFY_PAUSE_SEC = 1.5
 # With a PeripheralUID, makes that one shade report in without moving
 # (docs/HUB_PROTOCOL.md 4.6). 0 is the vendor app's value; 170 does nothing.
 ATTR_STATUS_REQUEST = "StatusRequest"

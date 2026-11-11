@@ -60,11 +60,12 @@ zero shades because of a bad reply.
 
 | Module | Responsibility | Knows about |
 |---|---|---|
-| `api.py` | HTTP client: endpoints (including the `/notification` stream, `notification_stream()`, and the per-shade `StatusRequest`, `request_status()`), payload shape, pacing, reply checking, the rule that no report request goes out unscoped (`check_scope`), exceptions | the hub protocol only |
+| `api.py` | HTTP client: endpoints (including the `/notification` stream, `notification_stream()`, the per-shade `StatusRequest`, `request_status()`, and the fine-tune jog, `jog()`), payload shape, pacing, reply checking, the rule that no report request goes out unscoped (`check_scope`), exceptions | the hub protocol only |
 | `coordinator.py` | polling, refreshes requested by the listener (through a `Debouncer` with a `REFRESH_COOLDOWN_SEC` cooldown), per-axis motion state, adaptive interval, verify-and-retry with the shade's report-in, `push_connected`, and `async_wait()`, the timer-based wait both it and the listener use | `api`, `options` |
 | `push.py` | `NotificationListener`: holds `/notification` open through `api.notification_stream()`, asks the coordinator for refreshes, tells it which shades an event named (`async_shades_reported`), recycles and reconnects the stream | `api`, `coordinator` |
 | `cover.py` | the cover entities: per-profile command mapping, tilt rules, the two-rail collision guard, slider animation | `coordinator` |
 | `sensor.py`, `binary_sensor.py` | battery entities | `coordinator`, `util.battery_percent` |
+| `button.py` | the Identify button: `IDENTIFY_TAPS` fine-tune jogs each way, with `IDENTIFY_PAUSE_SEC` between the two runs | `coordinator`, `api.jog` |
 | `entity.py` | base class: device info, availability, unique ids, naming | `coordinator` |
 | `options.py` | `ShadeAutoOptions`, the typed view of `entry.options` | `const` |
 | `config_flow.py` | add a hub, reconfigure its address, edit options | `api`, `options` |
@@ -525,6 +526,24 @@ actual) or `MOTION_FAILSAFE_SEC` elapses, so the position the shade actually
 stopped at appears within a couple of seconds of the hub reporting it (about
 35 s after the stop on the real hub).
 
+### Identify
+
+`button.<shade>_identify` (device class `identify`, category config) sends
+`MotorFineTuneToDown: 170` `IDENTIFY_TAPS` times, waits `IDENTIFY_PAUSE_SEC`,
+then `MotorFineTuneToUp: 170` as many times; a shade at bottom 0 goes up first
+and then back (`identify_goes_up_first`). Each jog runs the motor a small
+step, about one position unit (one was too small to see across a room, two
+is a clear twitch), and the jogs are paced like any command by
+`api.send_spacing_sec`, so a press plays out over several seconds. A jog
+leaves the hub's target as it was, so nothing is
+registered with the coordinator: no pending target, no motion, no verify. The
+press is refused with `HomeAssistantError` while `is_shade_moving()`, because
+a jog interrupts a move, and a hub error on either jog is raised as "Could not
+identify shade ...". It ends with `async_request_refresh()` so a unit the
+shade drifted is read back at once. The verbs are the vendor app's fine-tune
+taps (kedube/ha-norman); sent to a 48/1 roman shade from this project on
+2026-11-10, each moved it a little (`docs/HUB_PROTOCOL.md` 6).
+
 ### Failed commands
 
 When `/control` raises, either a connection error or a reply with
@@ -688,6 +707,7 @@ from `OptionsFlowWithReload`, so saving the form reloads the entry.
 | `cover.<shade>_top` | `two_rail` shades | `shadeauto_<identity>_<uid>_middle` | "Top" (translated), shown as "<shade> Top" |
 | `sensor.<shade>_battery` | every shade | `shadeauto_<identity>_<uid>_battery` | "Battery" (translated) |
 | `binary_sensor.<shade>_battery_low` | every shade | `shadeauto_<identity>_<uid>_battery_low` | "Battery low" (translated) |
+| `button.<shade>_identify` | every shade | `shadeauto_<identity>_<uid>_identify` | "Identify" (from the device class) |
 
 `<identity>` is the hub's `ThingName`, or its host if the hub has none.
 

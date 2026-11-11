@@ -53,10 +53,12 @@ SLUG = {
 COVER = {uid: f"cover.{slug}" for uid, slug in SLUG.items()}
 BATTERY = {uid: f"sensor.{slug}_battery" for uid, slug in SLUG.items()}
 BATTERY_LOW = {uid: f"binary_sensor.{slug}_battery_low" for uid, slug in SLUG.items()}
+ENTITIES_PER_SHADE = 4  # cover, battery, battery low, identify; a two-rail shade adds its Top cover
 
 BOTTOM = "BottomRailPosition"
 MIDDLE = "MiddleRailPosition"
 MOTOR_STOP = "MotorStop"
+JOG = {"MotorFineTuneToUp": 1, "MotorFineTuneToDown": -1}  # verb -> direction of the step
 STATUS_REQUEST = "StatusRequest"
 TARGET = {BOTTOM: "TargetBottomRailPosition", MIDDLE: "TargetMiddleRailPosition"}
 # Report requests the hub does not confine to one shade (docs/HUB_PROTOCOL.md 4.6).
@@ -173,6 +175,9 @@ class FakeHub:
       the stop point in one update, with a sheer shade's vanes and their target
       at 0 when the stop point is above 0 (log C4b), and a two-rail shade's
       middle target at its middle position;
+    * ``MotorFineTuneToUp`` / ``MotorFineTuneToDown`` move the bottom rail one
+      unit that way, clamped to 0-100, and leave the target alone (a jog on the
+      real hub; kedube/ha-norman saw 25 -> 24, and the target stayed);
     * the reply echoes the applied fields plus ``Error 0``.
 
     Targets change immediately; actual positions jump to the target either at
@@ -532,6 +537,12 @@ class FakeHub:
             else:
                 self._polls_until_stop[uid] = (self.stop_reports_after_polls, point)
             applied[MOTOR_STOP] = data[MOTOR_STOP]
+        elif jogs := [verb for verb in JOG if verb in data]:
+            for verb in jogs:
+                shade[BOTTOM] = max(0, min(100, int(shade[BOTTOM]) + JOG[verb]))
+                applied[verb] = data[verb]
+            shade["Timestamp"] = now
+            self.announce(uid)
         elif BOTTOM in data:
             self._polls_until_stop.pop(uid, None)  # a new move supersedes an unreported stop
             shade[TARGET[BOTTOM]] = int(data[BOTTOM])

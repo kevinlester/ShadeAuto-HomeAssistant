@@ -250,6 +250,7 @@ def test_request_status_is_the_only_report_request_the_api_offers() -> None:
         "notification_stream",
         "control",
         "stop",
+        "jog",
         "request_status",
     }
 

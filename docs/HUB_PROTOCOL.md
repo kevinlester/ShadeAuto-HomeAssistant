@@ -1310,7 +1310,7 @@ knows how to send to a shade, with their default or trigger values".
 | `ConfigToScene`, `SetToScene` | 287 | **Unverified.** Not sent. Scene store/recall; 287 may be a scene id or a magic value. |
 | `CleanAllScene` | 0 | **Unverified.** Not sent. Name suggests it erases all scenes. **Do not send.** |
 | `SetMotorToTopLimit`, `SetMotorToBottomLimit` | 170 | **Unverified.** Not sent. Likely "drive to the stored limit". |
-| `MotorFineTuneToUp`, `MotorFineTuneToDown` | 170 | **Unverified.** Not sent. Likely jog the motor a small step. |
+| `MotorFineTuneToUp`, `MotorFineTuneToDown` | 170 | Jog the motor a small step that way. kedube: the vendor app's fine-tune taps, sent as discrete taps with a `PeripheralUID`; on cellular shades one tap moved the rail about one unit (25 -> 24) and the hub's target stayed as it was. **Sent from this project** on 2026-11-10 to a 48/1 roman shade (`hubwatch.py --control <uid> MotorFineTuneToDown=170`): the shade moved down a little on every send. **The integration sends them**, a few each way, from the Identify button. |
 | `SetTopLimit`, `CleanTopLimit`, `SetBottomLimit`, `CleanBottomLimit`, `SetMiddleLimit`, `CleanMiddleLimit` | 0 | **Unverified.** Not sent. These program or erase the motor's travel limits. Sending one by accident could make the shade lose its end stops. **Never send casually.** |
 | `CleanRfPairing` | 0 | **Unverified.** Not sent. Name suggests it unpairs the shade from the hub. **Never send casually.** |
 | `CleanAllPosition` | 0 | **Unverified.** Not sent. **Never send casually.** |
@@ -1322,8 +1322,9 @@ knows how to send to a shade, with their default or trigger values".
 | `FirmwareVersion` | `""` | Empty in the template; `"2.4.1"` in live status. |
 
 Only `BottomRailPosition`, `MiddleRailPosition`, `MotorStop`,
-`RequestModuleInfo` and `StatusRequest` have ever been sent from this project,
-and of those the integration sends all but `RequestModuleInfo`.
+`MotorFineTuneToUp`, `MotorFineTuneToDown`, `RequestModuleInfo` and
+`StatusRequest` have ever been sent from this project, and of those the
+integration sends all but `RequestModuleInfo`.
 Anything with Limit, Calibration, Pairing, Clean or Reverse in its name should
 be treated as potentially destructive until someone proves otherwise on a
 shade they are willing to re-calibrate.

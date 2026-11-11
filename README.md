@@ -15,7 +15,8 @@ Control Norman **ShadeAuto** shades locally through the hub's undocumented HTTP 
     - tilt (open / close / set / stop) on PerfectSheer shades and SmartDrapes
   - One **Top** cover for two-rail shades
   - **Battery (%)** sensor per shade
-  - **Battery low** flag per shade.
+  - **Battery low** flag per shade
+  - **Identify** button per shade: jogs the shade a little so you can tell which one it is.
 - **State syncing**. The hub acts as the source of truth, which allows this integration to keep the state of the shades in sync regardless of how they were moved, even if they were moved outside of HA. See [How shade updates reach Home Assistant](#how-shade-updates-reach-home-assistant).
 
 ## Requirements
@@ -31,6 +32,7 @@ Every shade gets one device with these entities (`<shade>` is the shade's name f
 | `cover.<shade>_top` | Two-rail shades only: the top rail. The main cover then drives the bottom rail. | Same as above, for the top rail. |
 | `sensor.<shade>_battery` | Battery level (diagnostic). | Percent. |
 | `binary_sensor.<shade>_battery_low` | Low-battery flag (diagnostic). | `on` below the threshold set in Options. |
+| `button.<shade>_identify` | Jogs the shade a few small steps down and back up (up and back down if it is fully closed), so you can tell which shade an entity is while setting up. It uses the hub's own fine-tune nudge, the same small step as the vendor app, so the movement is subtle: listen for the motor and watch the bottom edge. The shade ends where it started and its position in Home Assistant does not change. Refused while the shade is moving. | Press. |
 
 PerfectSheer shades add tilt to `cover.<shade>`: open, close, stop and set tilt, with the attribute `current_tilt_position`, 0 = vanes closed, 100 = vanes open. SmartDrapes add the same tilt controls on the hub's own scale: 0 and 100 = vanes closed in opposite directions, 50 = vanes open (see [SmartDrapes](#smartdrapes)).
 

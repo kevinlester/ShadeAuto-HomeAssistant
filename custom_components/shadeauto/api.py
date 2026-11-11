@@ -25,11 +25,14 @@ from .const import (
     ATTR_BOTTOM_RAIL,
     ATTR_ERROR,
     ATTR_MIDDLE_RAIL,
+    ATTR_MOTOR_JOG_DOWN,
+    ATTR_MOTOR_JOG_UP,
     ATTR_MOTOR_STOP,
     ATTR_PERIPHERAL_UID,
     ATTR_STATUS_REQUEST,
     DEFAULT_PORT,
     DEFAULT_SEND_SPACING,
+    MOTOR_JOG,
     MOTOR_STOP,
     NEVER_SENT_FIELDS,
     NOTIFY_MAX_BUFFER,
@@ -273,6 +276,18 @@ class ShadeAutoApi:
     async def stop(self, uid: int | str) -> dict[str, Any]:
         """Stop a moving shade. The hub then re-targets the shade to wherever it stopped."""
         return await self._send_control(uid, {ATTR_MOTOR_STOP: MOTOR_STOP})
+
+    async def jog(self, uid: int | str, *, up: bool) -> dict[str, Any]:
+        """Nudge a shade one small step up or down and return the hub's reply.
+
+        ``MotorFineTuneToUp`` / ``MotorFineTuneToDown`` with the hub's execute
+        value: the vendor app's fine-tune taps. The motor runs briefly (about
+        one position unit) and the hub's target is left as it was, so the
+        coordinator sees nothing to track. Sent to a 48/1 roman shade on
+        2026-11-10: it moved a little each time. The Identify button sends one
+        each way.
+        """
+        return await self._send_control(uid, {ATTR_MOTOR_JOG_UP if up else ATTR_MOTOR_JOG_DOWN: MOTOR_JOG})
 
     async def request_status(self, uid: int | str) -> dict[str, Any]:
         """Ask one shade to report in (``StatusRequest: 0``) and return the hub's reply.

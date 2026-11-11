@@ -25,6 +25,5 @@ jobs:
       - uses: hacs/action@d556e736723344f83838d08488c983a15381059a # 22.5.0
         with:
           category: integration
-          # The brands check requires a PR to home-assistant/brands, which is
-          # outside this repository.
-          ignore: brands
+          # The brands check passes on custom_components/shadeauto/brand/icon.png
+          # (HACS default inclusion requires the action to run with no ignores).

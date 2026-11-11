@@ -64,6 +64,7 @@ from .conftest import (
     BOTTOM,
     COVER,
     DRAPE,
+    ENTITIES_PER_SHADE,
     KITCHEN,
     MIDDLE,
     MOTOR_STOP,
@@ -200,7 +201,7 @@ async def test_the_fixture_shades_keep_the_sheer_cover(
         assert coordinator.peripherals[str(uid)].profile == PROFILE_SHEER
         assert hass.states.get(COVER[uid]).attributes[ATTR_SUPPORTED_FEATURES] == ALL_FEATURES
         assert registry.async_get(COVER[uid]).unique_id == f"shadeauto_{hub.thing_name}_{uid}"
-    assert len(er.async_entries_for_config_entry(registry, integration.entry_id)) == 3 * len(ALL_UIDS)
+    assert len(er.async_entries_for_config_entry(registry, integration.entry_id)) == ENTITIES_PER_SHADE * len(ALL_UIDS)
 
 
 async def test_module_pair_missing_from_the_peripheral_list_is_taken_from_status(
@@ -354,8 +355,9 @@ async def test_two_rail_shade_gets_a_bottom_cover_and_a_top_cover(hass: HomeAssi
         assert state.state == CoverState.OPEN
     assert main_state.attributes[ATTR_CURRENT_POSITION] == 20
     assert top_state.attributes[ATTR_CURRENT_POSITION] == 60
-    # One battery sensor and one low-battery sensor per shade, not per rail.
-    assert len(er.async_entries_for_config_entry(registry, entry.entry_id)) == 3 * len(ALL_UIDS) + 4
+    # One battery sensor, one low-battery sensor and one identify button per shade, not per rail.
+    expected = ENTITIES_PER_SHADE * (len(ALL_UIDS) + 1) + 1  # + Patio's Top cover
+    assert len(er.async_entries_for_config_entry(registry, entry.entry_id)) == expected
 
 
 async def test_every_two_rail_command_carries_both_rails(hass: HomeAssistant, hub: FakeHub) -> None:
@@ -737,8 +739,8 @@ async def test_drape_gets_one_cover_with_lift_and_tilt_on_the_hub_scale(hass: Ho
     assert state.attributes["friendly_name"] == "Lounge"
     device = dr.async_get(hass).async_get(registry.async_get(LOUNGE_COVER).device_id)
     assert device.model == "SmartDrape (type 80/1)"
-    # One cover, one battery sensor and one low-battery sensor, like any other single-cover shade.
-    assert len(er.async_entries_for_config_entry(registry, entry.entry_id)) == 3 * len(ALL_UIDS) + 3
+    # One cover, one battery sensor, one low-battery sensor and one identify button, as for any single-cover shade.
+    assert len(er.async_entries_for_config_entry(registry, entry.entry_id)) == ENTITIES_PER_SHADE * (len(ALL_UIDS) + 1)
 
 
 async def test_every_drape_draw_restates_the_vanes_the_hub_reports(

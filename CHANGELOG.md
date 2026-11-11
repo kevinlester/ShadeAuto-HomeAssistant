@@ -3,6 +3,38 @@
 All notable changes to this integration are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.8.0] - 2026-11-11
+
+### Added
+- An **Identify** button per shade (`button.<shade>_identify`, device class
+  identify, category config), for telling which entity is which physical
+  shade (issue #4). It sends the hub's fine-tune jog twice one way and,
+  after a short pause, twice the other way, so the shade twitches and ends
+  where it started: down and back up, or up and back down when the shade is
+  fully closed. The jogs are paced like any command, so a press plays out
+  over several seconds. Each jog is the motor's own small step, the same as
+  the vendor app's nudge, so the movement is subtle: listen for the motor.
+  The jog verbs (`MotorFineTuneToUp` / `MotorFineTuneToDown`, the vendor
+  app's fine-tune taps documented by kedube/ha-norman) leave the hub's
+  target alone, so no motion, verify or position estimate is involved.
+  Refused while the shade is moving. Sent to a roman 48/1 shade on real
+  hardware; other types follow kedube's findings on cellular shades.
+- Brand images ship with the integration
+  (`custom_components/shadeauto/brand/`: icon and logo, with 2x versions,
+  transparent). Home Assistant 2026.3 and newer shows them instead of the
+  copies in the home-assistant/brands repository, which stay as the
+  fallback; the HACS and Marketplace catalog check reads the same folder.
+
+### Changed
+- The manifest's `iot_class` is `local_polling` again. 0.6.0 set it to
+  `local_push` when push updates were first added, but push is off by default
+  and polling is how most entries get their state.
+- `hacs.json` no longer sets `country`, which hid the integration from
+  Marketplace users outside the US. Nothing about the hub is region-specific.
+- The release workflow leaves a release that was made by hand alone instead
+  of failing on the tag push, and the HACS workflow runs the brands check
+  instead of ignoring it.
+
 ## [0.7.0] - 2026-11-10
 
 ### Added

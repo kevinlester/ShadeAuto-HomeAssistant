@@ -1,7 +1,10 @@
 name: Release
 
 # Pushing a tag like v0.4.0 publishes a GitHub release, which is what HACS
-# installs from. The tag must match the version in manifest.json.
+# installs from. The tag must match the version in manifest.json. A release
+# made by hand first (gh release create with a notes file pushes the tag and
+# makes the release in one step) is left alone: the tag push still runs this
+# workflow, so it skips instead of failing on "tag_name already exists".
 
 on:
   push:
@@ -29,12 +32,16 @@ jobs:
             echo "::error::manifest.json version ${manifest_version} does not match tag ${TAG}"
             exit 1
           fi
-      - name: Create release
+      - name: Create release unless one exists for the tag
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.ref_name }}
           REPO: ${{ github.repository }}
         run: |
+          if gh release view "${TAG}" --repo "${REPO}" --json tagName >/dev/null 2>&1; then
+            echo "::notice::release ${TAG} already exists; leaving it as published"
+            exit 0
+          fi
           gh release create "${TAG}" \
             --repo "${REPO}" \
             --title "ShadeAuto ${TAG#v}" \

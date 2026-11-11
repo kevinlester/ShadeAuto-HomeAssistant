@@ -4,6 +4,9 @@
   "codeowners": [
     "@kevinlester"
   ],
+  "categories": [
+    "blinds_curtains"
+  ],
   "config_flow": true,
   "documentation": "https://github.com/kevinlester/ShadeAuto-HomeAssistant",
   "iot_class": "local_polling",
@@ -12,5 +15,5 @@
     "custom_components.shadeauto"
   ],
   "requirements": [],
-  "version": "0.8.0"
+  "version": "0.8.1"
 }

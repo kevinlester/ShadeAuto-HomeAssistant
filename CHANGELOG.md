@@ -3,6 +3,14 @@
 All notable changes to this integration are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.8.1] - 2026-11-11
+
+### Added
+- The manifest lists the integration under the **Blinds & curtains**
+  category (`categories: ["blinds_curtains"]`, Home Assistant 2026.11's
+  integration categories), so the Marketplace shows it when browsing by
+  category and the HACS action no longer warns that it has none.
+
 ## [0.8.0] - 2026-11-11
 
 ### Added

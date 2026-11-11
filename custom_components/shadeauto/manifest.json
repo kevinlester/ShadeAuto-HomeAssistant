@@ -1,6 +1,9 @@
 {
   "domain": "shadeauto",
   "name": "ShadeAuto (local)",
+  "categories": [
+    "blinds_curtains"
+  ],
   "codeowners": [
     "@kevinlester"
   ],
@@ -12,5 +15,5 @@
     "custom_components.shadeauto"
   ],
   "requirements": [],
-  "version": "0.8.0"
+  "version": "0.8.1"
 }

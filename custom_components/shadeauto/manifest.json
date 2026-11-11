@@ -1,11 +1,11 @@
 {
   "domain": "shadeauto",
   "name": "ShadeAuto (local)",
-  "codeowners": [
-    "@kevinlester"
-  ],
   "categories": [
     "blinds_curtains"
+  ],
+  "codeowners": [
+    "@kevinlester"
   ],
   "config_flow": true,
   "documentation": "https://github.com/kevinlester/ShadeAuto-HomeAssistant",

@@ -19,7 +19,8 @@
     },
     "abort": {
       "already_configured": "This hub is already configured.",
-      "reconfigure_successful": "Hub address updated."
+      "reconfigure_successful": "Hub address updated.",
+      "wrong_hub": "A different ShadeAuto hub answers at that address. Add it as a new hub instead."
     }
   },
   "options": {

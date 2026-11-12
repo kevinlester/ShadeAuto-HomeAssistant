@@ -66,7 +66,7 @@ zero shades because of a bad reply.
 | `cover.py` | the cover entities: per-profile command mapping, tilt rules, the two-rail collision guard, slider animation | `coordinator` |
 | `sensor.py`, `binary_sensor.py` | battery entities | `coordinator`, `util.battery_percent` |
 | `button.py` | the Identify button: `IDENTIFY_TAPS` fine-tune jogs each way, with `IDENTIFY_PAUSE_SEC` between the two runs | `coordinator`, `api.jog` |
-| `entity.py` | base class: device info, availability, unique ids, naming | `coordinator` |
+| `entity.py` | base class: device info, availability, entity unique ids, naming | `coordinator` |
 | `options.py` | `ShadeAutoOptions`, the typed view of `entry.options` | `const` |
 | `config_flow.py` | add a hub, reconfigure its address, edit options | `api`, `options` |
 | `__init__.py` | wires everything into `entry.runtime_data` and starts the listener when `push_enabled` is on | all of the above |
@@ -334,7 +334,9 @@ by this project.
 `PROFILE_BY_MODULE` first, then the family in `PROFILE_BY_MODULE_TYPE`, else
 `legacy`. A missing `ModuleDetail` gives `legacy` for a type that has exact
 pairs (32, 48, 49), because which product it is cannot be told; type 33 stays
-`two_rail` without one. The tables, with a comment per entry on where it comes from, are in
+`two_rail` without one. A family the integration cannot drive is
+`unsupported`: the platforms build entities from
+`coordinator.supported_uids`, which leaves those shades out. The tables, with a comment per entry on where it comes from, are in
 `const.py`, and so is `PROFILE_AXES`, the axes each profile tracks. The pair
 comes from `/GetAllPeripheral` and is completed from the first `/status`; the
 profile is fixed after that, because the entities are built from it.
@@ -345,7 +347,8 @@ profile is fixed after that, because the entities are built from it.
 | `single_rail` | every other detail of 32, 48 and 49: 32/0, 32/2 (cellular), 48/1, 49/1 (roller), 48/2, 49/2 (roman) | one cover, lift only | `bottom` | `bottom` alone, as in 0.3.0; [Single-rail and legacy](#single-rail-and-legacy) |
 | `two_rail` | 33/any, 32/3, 32/4, 32/5 (day/night, top-down/bottom-up) | the cover for the bottom rail, plus a "Top" cover for the upper rail | `bottom`, `middle` | always both rails, collision guard; [Two-rail](#two-rail-commands-and-the-collision-guard) |
 | `drape` | 80/any (SmartDrape) | one cover with the draw and vane tilt on the hub's scale, re-mapped on an open drape by `drape_vane_end_stop` (tilt unless `tilt_mode` is `off`) | `bottom` | always `(bottom, middle)`: a draw restates the vanes the hub last reported (a close with the end stop set shuts vanes at the stop), a tilt restates where the draw is heading; nothing is lowered first |
-| `legacy` | 1/any (shutter), 32/48/49 without a `ModuleDetail`, anything unrecognised | one cover, lift only | `bottom` | as `single_rail` |
+| `legacy` | 32/48/49 without a `ModuleDetail`, anything unrecognised | one cover, lift only | `bottom` | as `single_rail` |
+| `unsupported` | 1/any (shutter) | none, and no device | none | nothing is sent |
 
 Why each profile is the way it is:
 
@@ -358,9 +361,10 @@ Why each profile is the way it is:
   re-send commands. Bottom-only payloads are what 0.3.0 sent and what upstream
   PR #9 keeps for single-rail shades; the hub's implied middle target of 0 does
   nothing on a shade without a middle rail.
-- **`two_rail`** is ported from upstream PR #9, which was tested on one real
-  type 33 shade. A bottom-only payload would set the upper rail's target to 0
-  and pull it down, so both rails go in every command.
+- **`two_rail`** is ported from upstream PR #9, whose author ran it on real
+  type 33 shades on this integration's 0.3.0; the port sends the same
+  payloads. A bottom-only payload would set the upper rail's target to 0 and
+  pull it down, so both rails go in every command.
 - **`drape`** is upstream PR #7 as a profile. That PR drove the same two
   fields; rtm tested this profile on three 80/1 drapes (firmware 0.2.3) and
   every command did what it was designed to. The vane axis is deliberately
@@ -393,11 +397,15 @@ Why each profile is the way it is:
   arrives (rtm), so one close shuts everything. Vanes between the stops stay
   put: the hub's stops do not move with the draw, so the same 33 reads 24 on
   an open drape and 33 on a closed one.
-- **`legacy`** is for families with no verified behaviour in this codebase.
-  It does the least that can go wrong: lift only, the 0.3.0 payload.
-  Shutters (`KNOWN_UNSUPPORTED_MODULE_TYPES`) get it quietly;
-  a pair that is not in the tables at all also logs a warning asking the user
-  to report its type, so the tables can grow from real reports.
+- **`legacy`** is for pairs with no verified behaviour in this codebase.
+  It does the least that can go wrong: lift only, the 0.3.0 payload, and a
+  warning asking the user to report the type, so the tables can grow from
+  real reports.
+- **`unsupported`** is for a family the integration knows it cannot drive:
+  shutters have louvres (a `Position` field, 0-7) and no rails, and nothing
+  here has been tried on one. Rather than a cover whose commands probably do
+  nothing, the shade gets no entities and no device; one info line at setup
+  names it (`UNSUPPORTED_MODULE_FAMILIES` gives the family name).
 
 `tilt_mode` (`auto` or `off`) only matters for `sheer` and `drape`: `auto`
 exposes tilt on those shades, `off` hides it. It replaced 0.4.0's `tilt_enabled`, which put
@@ -510,8 +518,7 @@ a rail the guard drags or pushes shows opening/closing at once, but its
 position changes only when the hub reports it. A stop on either cover sends
 the shade's single `MotorStop`.
 
-The guard is ported from PR #9; it has not been run against a real two-rail
-shade by this project.
+The guard is ported from PR #9, which ran it on real two-rail shades.
 
 ### Stop
 
@@ -723,6 +730,15 @@ from `OptionsFlowWithReload`, so saving the form reloads the entry.
   never by the host, so Reconfigure (a host change) keeps devices, areas and
   user renames. Devices that 0.3.x created with host-based identifiers are
   migrated to the `ThingName` identity once, at setup.
+- The config entry's unique id is `shadeauto_<identity>` too
+  (`util.hub_unique_id`), so one hub cannot be added twice under two
+  addresses and Reconfigure refuses an address where a different hub answers
+  (`wrong_hub`). Versions up to 0.8.1 keyed the entry on the host, which Home
+  Assistant's guidelines rule out for a unique id; setup re-keys such an entry
+  once, and the reconfigure flow treats the host form as "not yet re-keyed"
+  rather than as a different hub, because an entry whose hub moved before the
+  upgrade never loads and so is never re-keyed by setup. The unique id is only
+  read by the config flow, so the change touches nothing the user sees.
 - Entities use `has_entity_name`: the main cover has no name of its own (it
   shows the device name); the Top cover and the battery entities add a
   translated suffix from `translations/en.json`.

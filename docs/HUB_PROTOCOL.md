@@ -743,7 +743,7 @@ you own one of those shades, the notes below say what to check.
 | 33/x | Cellular shade with two rails: day/night or top-down/bottom-up | The upper rail's height, on the same axis as the bottom rail | kedube: 33/3 on real hardware, 33/4-5 vendor app only; PR #9: one real type 33 shade | `two_rail` |
 | 32/3, 32/4, 32/5 | Cellular shade, top-down/bottom-up | As 33 | kedube: vendor app only (the app draws two sliders) | `two_rail` |
 | 80/x | SmartDrape | Vanes in stops about 17 apart, open at 50, closed at 0 and 100; held to 17-83 while the drape is open | kedube: 80/1 from one user's diagnostics (issue #2); PR #7 matches; rtm on three 80/1 drapes, firmware 0.2.3 (the `drape` profile and the limit) | `drape` |
-| 1/x | Shutter | No rails; the louvres are a separate `Position` field, 0-7 | kedube: vendor app only | `legacy` |
+| 1/x | Shutter | No rails; the louvres are a separate `Position` field, 0-7 | kedube: vendor app only | `unsupported`: no entities |
 | 32, 48, 49 without a `ModuleDetail` | Cannot be told | Unknown | | `legacy`, with a warning in the log |
 | anything else | | Unknown | | `legacy`, with a warning in the log |
 
@@ -848,13 +848,13 @@ rtm tested the profile on three 80/1 drapes (motor firmware 0.2.3, HA
 other firmware puts the limit anywhere other than 17/83.
 
 **Shutter (1/x).** kedube, from the vendor app's library only: no rails; the
-louvres are one `Position` field, 0-7 (7 shut, 3 horizontal), sent alone. The
-`legacy` profile sends `BottomRailPosition`, which a shutter presumably
-ignores (**unverified**). Louvre control is not supported.
+louvres are one `Position` field, 0-7 (7 shut, 3 horizontal), sent alone.
+`BottomRailPosition` presumably does nothing on a shutter (**unverified**),
+so the integration creates no entities for one (`unsupported` profile) and
+sends it nothing. Louvre control is not supported.
 
 **Anything else.** `legacy`: lift only, bottom-only commands, and a warning in
-the log asking the user to report the type (shutters get the same profile
-without the warning). Other details of types 32, 48 and 49 are
+the log asking the user to report the type. Other details of types 32, 48 and 49 are
 not "anything else": they get `single_rail` without a warning, like the rest
 of their family; only a 32, 48 or 49 reported without a `ModuleDetail` falls
 back to `legacy`, because which product it is cannot be told. The pair comes

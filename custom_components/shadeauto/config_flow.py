@@ -48,12 +48,9 @@ from .const import (
     TILT_MODES,
 )
 from .options import ShadeAutoOptions
+from .util import hub_unique_id, is_host_unique_id
 
 HOST_SCHEMA = vol.Schema({vol.Required(CONF_HOST): TextSelector()})
-
-
-def _unique_id(host: str) -> str:
-    return f"shadeauto_{host}"
 
 
 def _seconds(minimum: float, maximum: float, step: float = 1, *, box: bool = False) -> NumberSelector:
@@ -62,7 +59,14 @@ def _seconds(minimum: float, maximum: float, step: float = 1, *, box: bool = Fal
 
 
 class ShadeAutoConfigFlow(ConfigFlow, domain=DOMAIN):
-    """Add a hub by host name or IP."""
+    """Add a hub by host name or IP.
+
+    The entry's unique id is the hub's ``ThingName``, read from
+    ``/registration`` while checking that the host answers, so the same hub
+    cannot be added twice under two addresses and a reconfigure to an address
+    where a different hub answers is refused. A hub that reports no
+    ``ThingName`` is keyed on its host, as every entry was up to 0.8.1.
+    """
 
     VERSION = 1
 
@@ -71,47 +75,75 @@ class ShadeAutoConfigFlow(ConfigFlow, domain=DOMAIN):
     def async_get_options_flow(config_entry: ConfigEntry) -> ShadeAutoOptionsFlow:
         return ShadeAutoOptionsFlow()
 
-    async def _async_can_connect(self, host: str) -> bool:
+    async def _async_hub_identity(self, host: str) -> str | None:
+        """The hub's ``ThingName`` (its host if it reports none), or ``None`` when nothing answers."""
         api = ShadeAutoApi(host, async_get_clientsession(self.hass))
         try:
             await api.registration()
         except ShadeAutoError:
-            return False
-        return True
+            return None
+        return api.thing_name or host
+
+    def _host_in_use(self, host: str, *, except_entry_id: str | None = None) -> bool:
+        """Whether another entry already talks to ``host``.
+
+        Checked before asking the hub: it needs no network, and it catches an
+        entry that still carries the host-based unique id of versions up to
+        0.8.1, which the ``ThingName`` check below cannot.
+        """
+        return any(
+            other.data.get(CONF_HOST) == host and other.entry_id != except_entry_id
+            for other in self._async_current_entries(include_ignore=False)
+        )
 
     async def async_step_user(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         errors: dict[str, str] = {}
         if user_input is not None:
             host = user_input[CONF_HOST].strip()
-            await self.async_set_unique_id(_unique_id(host))
-            self._abort_if_unique_id_configured()
-            if await self._async_can_connect(host):
+            if self._host_in_use(host):
+                return self.async_abort(reason="already_configured")
+            if (identity := await self._async_hub_identity(host)) is None:
+                errors["base"] = "cannot_connect"
+            else:
+                await self.async_set_unique_id(hub_unique_id(identity))
+                self._abort_if_unique_id_configured()
                 return self.async_create_entry(title=f"ShadeAuto ({host})", data={CONF_HOST: host})
-            errors["base"] = "cannot_connect"
         return self.async_show_form(step_id="user", data_schema=HOST_SCHEMA, errors=errors)
 
     async def async_step_reconfigure(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
-        """Change the hub's host, e.g. after it got a new IP address."""
+        """Change the hub's host, e.g. after it got a new IP address.
+
+        The hub at the new address must be the hub this entry is for, unless
+        the entry still carries the host-based unique id of versions up to
+        0.8.1: it has never loaded on this version (the hub moved before the
+        upgrade, say), so there is no ``ThingName`` to compare with, and the
+        entry is re-keyed here instead.
+        """
         entry = self._get_reconfigure_entry()
         errors: dict[str, str] = {}
         if user_input is not None:
             host = user_input[CONF_HOST].strip()
-            new_unique_id = _unique_id(host)
-            # Not _abort_if_unique_id_configured(): it would also trip on this
-            # entry's own unique id when the host is submitted unchanged.
-            if any(
-                other.unique_id == new_unique_id and other.entry_id != entry.entry_id
-                for other in self._async_current_entries(include_ignore=False)
-            ):
+            if self._host_in_use(host, except_entry_id=entry.entry_id):
                 return self.async_abort(reason="already_configured")
-            if await self._async_can_connect(host):
+            if (identity := await self._async_hub_identity(host)) is None:
+                errors["base"] = "cannot_connect"
+            else:
+                await self.async_set_unique_id(hub_unique_id(identity))
+                if not is_host_unique_id(entry.unique_id, entry.data.get(CONF_HOST)):
+                    self._abort_if_unique_id_mismatch(reason="wrong_hub")
+                # Not _abort_if_unique_id_configured(): it would trip on this
+                # entry's own unique id when the host is the same hub.
+                if any(
+                    other.unique_id == self.unique_id and other.entry_id != entry.entry_id
+                    for other in self._async_current_entries(include_ignore=False)
+                ):
+                    return self.async_abort(reason="already_configured")
                 return self.async_update_reload_and_abort(
                     entry,
-                    unique_id=new_unique_id,
+                    unique_id=self.unique_id,
                     title=f"ShadeAuto ({host})",
                     data_updates={CONF_HOST: host},
                 )
-            errors["base"] = "cannot_connect"
         schema = self.add_suggested_values_to_schema(HOST_SCHEMA, {CONF_HOST: entry.data.get(CONF_HOST, "")})
         return self.async_show_form(step_id="reconfigure", data_schema=schema, errors=errors)
 

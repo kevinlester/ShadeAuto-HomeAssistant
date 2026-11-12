@@ -284,8 +284,8 @@ class ShadeAutoApi:
         value: the vendor app's fine-tune taps. The motor runs briefly (about
         one position unit) and the hub's target is left as it was, so the
         coordinator sees nothing to track. Sent to a 48/1 roman shade on
-        2026-11-10: it moved a little each time. The Identify button sends one
-        each way.
+        2026-11-10: it moved a little each time. The Identify button sends
+        ``IDENTIFY_TAPS`` of them each way.
         """
         return await self._send_control(uid, {ATTR_MOTOR_JOG_UP if up else ATTR_MOTOR_JOG_DOWN: MOTOR_JOG})
 

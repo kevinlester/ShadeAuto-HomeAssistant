@@ -64,7 +64,6 @@ from .const import (
     AXIS_FIELDS,
     AXIS_MIDDLE,
     DOMAIN,
-    KNOWN_UNSUPPORTED_MODULE_TYPES,
     MOTION_FAILSAFE_SEC,
     PENDING_GRACE_SEC,
     POSITION_TOLERANCE,
@@ -72,8 +71,10 @@ from .const import (
     PROFILE_BY_MODULE,
     PROFILE_BY_MODULE_TYPE,
     PROFILE_LEGACY,
+    PROFILE_UNSUPPORTED,
     REFRESH_COOLDOWN_SEC,
     STATUS_REPORT_WAIT_SEC,
+    UNSUPPORTED_MODULE_FAMILIES,
     UNTRACKED_SETTLE_SEC,
 )
 from .options import ShadeAutoOptions
@@ -126,7 +127,8 @@ def shade_profile(module_type: int | None, module_detail: int | None) -> str:
     Anything the tables do not cover is ``legacy``: lift only, as 0.3.0
     handled every shade. That includes a missing ``ModuleDetail`` on a type
     whose profile depends on the detail (32, 48, 49), because which of its
-    profiles applies cannot be told.
+    profiles applies cannot be told. A family the integration cannot drive
+    (a shutter) is ``unsupported`` and gets no entities.
     """
     if module_type is None:
         return PROFILE_LEGACY
@@ -246,6 +248,11 @@ class ShadeAutoCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         """Stable hub identity for unique IDs: its ThingName, else the host."""
         return self.api.thing_name or self.api.host
 
+    @property
+    def supported_uids(self) -> list[str]:
+        """The shades that get entities: every peripheral whose profile the integration can drive."""
+        return [uid for uid, peripheral in self.peripherals.items() if peripheral.profile != PROFILE_UNSUPPORTED]
+
     def status_for(self, uid: str) -> dict[str, Any]:
         """The most recent ``/status`` record for ``uid`` (empty if unknown)."""
         status: dict[str, dict[str, Any]] = (self.data or {}).get("status", {})
@@ -364,9 +371,10 @@ class ShadeAutoCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         Runs once, on the refresh that ends setup: the platforms create their
         entities from the profiles right after it, so a profile must not change
-        later. Shades left on the legacy profile are logged here, once per
-        setup: a warning for a pair nobody has reported yet, a debug line for
-        the families the vendor app knows but this integration does not drive.
+        later. Shades the integration does not know how to drive are logged
+        here, once per setup: a warning for a pair nobody has reported yet
+        (handled as a lift-only shade), an info line for the families it
+        knows it cannot drive (no entities).
         """
         records = {str(item.get(ATTR_PERIPHERAL_UID)): item for item in status}
         for uid, peripheral in self.peripherals.items():
@@ -380,19 +388,20 @@ class ShadeAutoCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         unrecognised: dict[tuple[int | None, int | None], list[str]] = {}
         for peripheral in self.peripherals.values():
-            if peripheral.profile == PROFILE_LEGACY:
+            if peripheral.profile == PROFILE_UNSUPPORTED:
+                # Only a type in the profile table gets here, so module_type is set.
+                family = UNSUPPORTED_MODULE_FAMILIES.get(peripheral.module_type or 0, "shade")
+                _LOGGER.info(
+                    "%s is a %s (ModuleType %s / ModuleDetail %s), which this integration cannot drive; "
+                    "no entities are created for it",
+                    peripheral.name,
+                    family,
+                    peripheral.module_type,
+                    peripheral.module_detail,
+                )
+            elif peripheral.profile == PROFILE_LEGACY:
                 unrecognised.setdefault((peripheral.module_type, peripheral.module_detail), []).append(peripheral.name)
         for (module_type, module_detail), names in unrecognised.items():
-            family = KNOWN_UNSUPPORTED_MODULE_TYPES.get(module_type) if module_type is not None else None
-            if family is not None:
-                _LOGGER.debug(
-                    "%s (%s, ModuleType %s / ModuleDetail %s) has no verified behaviour; handled as a lift-only shade",
-                    ", ".join(names),
-                    family,
-                    module_type,
-                    module_detail,
-                )
-                continue
             _LOGGER.warning(
                 "ModuleType %s / ModuleDetail %s, reported for shade %s, is not a shade type this integration "
                 "recognises, so it is handled as a lift-only shade. Please report the pair and the shade's "

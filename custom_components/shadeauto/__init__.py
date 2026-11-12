@@ -24,6 +24,7 @@ from .coordinator import ShadeAutoCoordinator
 from .entity import hub_device_identifier, shade_device_identifier
 from .options import ShadeAutoOptions
 from .push import NotificationListener
+from .util import hub_unique_id
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -47,6 +48,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ShadeAutoConfigEntry) ->
     coordinator = ShadeAutoCoordinator(hass, entry, api, options)
     await coordinator.async_config_entry_first_refresh()
 
+    _async_migrate_unique_id(hass, entry, coordinator.identity)
     registry = dr.async_get(hass)
     _async_migrate_device_identifiers(registry, entry, coordinator.identity)
 
@@ -73,6 +75,38 @@ async def async_setup_entry(hass: HomeAssistant, entry: ShadeAutoConfigEntry) ->
 
 async def async_unload_entry(hass: HomeAssistant, entry: ShadeAutoConfigEntry) -> bool:
     return await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
+
+
+@callback
+def _async_migrate_unique_id(hass: HomeAssistant, entry: ConfigEntry, identity: str) -> None:
+    """Re-key the entry on the hub's stable identity.
+
+    Versions up to 0.8.1 used the host as the entry's unique id, which Home
+    Assistant's guidelines rule out: an address is not a property of the
+    hub. The unique id is only used by the config flow to refuse a hub that
+    is already configured, so changing it touches nothing the user sees:
+    the entry keeps its id, data, options, title, devices and entities. If
+    another entry already carries the new id (the same hub was added twice
+    under two addresses, which the host-based id could not catch), this one
+    keeps its old id and the log says so.
+    """
+    wanted = hub_unique_id(identity)
+    if entry.unique_id == wanted:
+        return
+    taken = [
+        other for other in hass.config_entries.async_entries(DOMAIN) if other.unique_id == wanted and other is not entry
+    ]
+    if taken:
+        _LOGGER.warning(
+            "Entry %s (%s) is the same hub as entry %s (%s); remove one of them",
+            entry.title,
+            entry.data.get(CONF_HOST),
+            taken[0].title,
+            taken[0].data.get(CONF_HOST),
+        )
+        return
+    _LOGGER.debug("Re-keying entry %s from unique id %s to %s", entry.title, entry.unique_id, wanted)
+    hass.config_entries.async_update_entry(entry, unique_id=wanted)
 
 
 def _migrated_identifier(identifier: tuple[str, str], identity: str) -> tuple[str, str]:

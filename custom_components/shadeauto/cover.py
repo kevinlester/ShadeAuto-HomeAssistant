@@ -84,9 +84,7 @@ TILT_FEATURES = (
     CoverEntityFeature.OPEN_TILT
     | CoverEntityFeature.CLOSE_TILT
     | CoverEntityFeature.SET_TILT_POSITION
-    # STOP_TILT sends the same MotorStop as STOP (one motor, one command). On the
-    # hub it was verified stopping a lift; a stop during a vane move was not
-    # tried separately (docs/HUB_PROTOCOL.md, open question 12).
+    # STOP_TILT sends the same MotorStop as STOP: one motor, one stop command.
     | CoverEntityFeature.STOP_TILT
 )
 
@@ -209,7 +207,7 @@ async def async_setup_entry(
     hass: HomeAssistant, entry: ShadeAutoConfigEntry, async_add_entities: AddConfigEntryEntitiesCallback
 ) -> None:
     coordinator = entry.runtime_data.coordinator
-    async_add_entities(cover for uid in coordinator.peripherals for cover in _covers_for(coordinator, uid))
+    async_add_entities(cover for uid in coordinator.supported_uids for cover in _covers_for(coordinator, uid))
 
 
 def _covers_for(coordinator: ShadeAutoCoordinator, uid: str) -> list[ShadeAutoCover]:

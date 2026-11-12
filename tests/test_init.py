@@ -5,10 +5,12 @@ from __future__ import annotations
 from homeassistant.config_entries import ConfigEntryState
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import device_registry as dr, entity_registry as er
+import pytest
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.shadeauto.compat import get_device_by_identifier
 from custom_components.shadeauto.const import DOMAIN
+from custom_components.shadeauto.util import hub_unique_id
 
 from .conftest import (
     ALL_UIDS,
@@ -20,6 +22,7 @@ from .conftest import (
     KITCHEN,
     OFFICE,
     FakeHub,
+    make_entry,
     setup_integration,
 )
 
@@ -46,6 +49,44 @@ async def test_setup_creates_entities_from_hub_status(
     assert dining.attributes["friendly_name"] == "PerfectSheer_38A4"
 
     assert hass.states.get(COVER[OFFICE]).attributes["current_position"] == 35
+
+
+async def test_setup_rekeys_an_entry_from_the_host_to_the_thing_name(
+    hass: HomeAssistant, hub: FakeHub, caplog: pytest.LogCaptureFixture
+) -> None:
+    """An entry from 0.8.1 (unique id = host) is re-keyed on the hub's ThingName; nothing else about it changes."""
+    entry = make_entry(unique_id=hub_unique_id(HOST))
+    entry.add_to_hass(hass)
+    await setup_integration(hass, entry)
+
+    assert entry.state is ConfigEntryState.LOADED
+    assert entry.unique_id == hub_unique_id(hub.thing_name)
+    assert entry.data == {"host": HOST}
+    assert entry.title == f"ShadeAuto ({HOST})"
+    assert hass.states.get(COVER[KITCHEN]) is not None
+    assert "remove one of them" not in caplog.text
+
+
+async def test_setup_leaves_a_second_entry_for_the_same_hub_on_its_old_unique_id(
+    hass: HomeAssistant, hub: FakeHub, integration: MockConfigEntry, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Two entries for one hub (added under two addresses on 0.8.1) cannot share the new id; the log says which."""
+    hub.add_host("192.168.3.250")
+    second = MockConfigEntry(
+        domain=DOMAIN,
+        title="ShadeAuto (192.168.3.250)",
+        unique_id=hub_unique_id("192.168.3.250"),
+        data={"host": "192.168.3.250"},
+        options=dict(integration.options),
+    )
+    second.add_to_hass(hass)
+    await setup_integration(hass, second)
+
+    assert second.state is ConfigEntryState.LOADED
+    assert second.unique_id == hub_unique_id("192.168.3.250")
+    assert integration.unique_id == hub_unique_id(hub.thing_name)
+    assert "ShadeAuto (192.168.3.250) (192.168.3.250) is the same hub as entry" in caplog.text
+    assert "remove one of them" in caplog.text
 
 
 async def test_hub_and_shade_devices_are_registered(

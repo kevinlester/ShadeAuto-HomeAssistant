@@ -3,6 +3,42 @@
 All notable changes to this integration are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.8.2] - 2026-11-12
+
+### Changed
+- The integration is named **Norman ShadeAuto** (manifest and `hacs.json`;
+  it was "ShadeAuto (local)"), so a search for either word finds it in the
+  Marketplace and in Add Integration. The domain, entity ids and device names
+  are unchanged.
+- The config entry is keyed on the hub's `ThingName` instead of its address,
+  which Home Assistant's guidelines rule out as a unique id. Entries from
+  earlier versions are re-keyed on their first load; nothing the user sees
+  changes (entry, devices, entities, areas, options and automations are all
+  kept). The same hub can no longer be added twice under two addresses, and
+  Reconfigure refuses an address where a different hub answers (new abort
+  message `wrong_hub`); an entry whose hub moved before the upgrade can
+  still be reconfigured, since the old host-based id is recognised.
+- Shutters (ModuleType 1) get no entities and no device. They have louvres
+  rather than rails and nothing here has been tried on one, so the
+  integration no longer offers a cover whose commands probably do nothing.
+  One info line at startup names each shutter the hub lists. Other
+  unrecognised types are handled as before (lift only, with a warning).
+
+### Fixed
+- Comments in the code said the Identify button sends one jog each way; it
+  sends `IDENTIFY_TAPS` (two). README wording: the low-battery flag turns on
+  at or below the threshold, and "finds every shade on the hub" replaces
+  "auto-discover", which read like network discovery of hubs. The two-rail
+  rows now say what PR #9's author tested on hardware (three shades, then
+  one, on 0.3.0) instead of "not tested", and the installation section
+  leads with searching HACS, keeping the custom-repository steps as the
+  fallback.
+- The README's shade-type table lists each type and how it is handled,
+  without a per-type testing status; every type runs one of the three
+  payload shapes that have been run on real hardware, and the hub protocol
+  doc keeps the evidence per family. The people who tested on hardware are
+  credited in one place at the end.
+
 ## [0.8.1] - 2026-11-11
 
 ### Added

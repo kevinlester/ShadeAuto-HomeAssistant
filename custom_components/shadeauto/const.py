@@ -126,7 +126,7 @@ MOTOR_STOP = 170  # the hub's "execute" value for action fields such as MotorSto
 # Jog the motor one small step (about one position unit) without changing the
 # hub's target. The vendor app's fine-tune taps, captured by kedube/ha-norman
 # on types 32/33; sent here to a 48/1 roman shade on 2026-11-10 and it moved
-# a little each time. The Identify button sends one each way.
+# a little each time. The Identify button sends IDENTIFY_TAPS each way.
 ATTR_MOTOR_JOG_UP = "MotorFineTuneToUp"
 ATTR_MOTOR_JOG_DOWN = "MotorFineTuneToDown"
 MOTOR_JOG = 170
@@ -174,6 +174,7 @@ PROFILE_SINGLE_RAIL = "single_rail"  # bottom rail only; the middle rail always 
 PROFILE_TWO_RAIL = "two_rail"  # two independent rail heights (top-down/bottom-up, day/night)
 PROFILE_DRAPE = "drape"  # bottom rail = how far the drape is drawn, middle rail = vane tilt on the hub's scale
 PROFILE_LEGACY = "legacy"  # no verified behaviour; handled like single_rail, as 0.3.0 did
+PROFILE_UNSUPPORTED = "unsupported"  # a family the integration cannot drive: no entities, no device
 
 # A SmartDrape's vanes on the hub's scale: 0 and 100 are closed in opposite
 # directions, 50 is open (kedube/ha-norman "Cover types"; upstream PR #7, whose
@@ -219,11 +220,14 @@ PROFILE_BY_MODULE_TYPE: dict[int, str] = {
     # tested by rtm on three 80/1 drapes (firmware 0.2.3): tilt, draw, stop
     # and the vanes restated through a draw all behaved as designed.
     80: PROFILE_DRAPE,
+    # Shutter: louvres as a Position field 0-7 and no rails at all (kedube,
+    # "Cover types", from the vendor app's library). Nothing here has been
+    # tried on one, and the rail commands presumably do nothing, so no
+    # entities are created for it rather than a cover that cannot move it.
+    1: PROFILE_UNSUPPORTED,
 }
-# Families the vendor app knows that have no verified behaviour here
-# (Shutter: louvers as Position 0-7, no rails; kedube, "Cover types"). They get
-# the legacy profile without a warning.
-KNOWN_UNSUPPORTED_MODULE_TYPES: dict[int, str] = {1: "Shutter"}
+# Names for the families that get PROFILE_UNSUPPORTED, for the setup log line.
+UNSUPPORTED_MODULE_FAMILIES: dict[int, str] = {1: "Shutter"}
 # The Top cover of a two-rail shade is the main cover's unique id plus this:
 # upstream PR #9 (alexfgoldberg's fork) used it, so its users keep the entity.
 TOP_COVER_UNIQUE_ID_SUFFIX = "_middle"
@@ -243,6 +247,7 @@ PROFILE_AXES: dict[str, tuple[str, ...]] = {
     PROFILE_SINGLE_RAIL: (AXIS_BOTTOM,),
     PROFILE_DRAPE: (AXIS_BOTTOM,),
     PROFILE_LEGACY: (AXIS_BOTTOM,),
+    PROFILE_UNSUPPORTED: (),
 }
 
 # --- Motion tracking ---------------------------------------------------------

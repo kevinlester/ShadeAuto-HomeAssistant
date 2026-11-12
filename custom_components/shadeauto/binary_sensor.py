@@ -22,7 +22,7 @@ async def async_setup_entry(
     hass: HomeAssistant, entry: ShadeAutoConfigEntry, async_add_entities: AddConfigEntryEntitiesCallback
 ) -> None:
     coordinator = entry.runtime_data.coordinator
-    async_add_entities(ShadeAutoBatteryLow(coordinator, uid) for uid in coordinator.peripherals)
+    async_add_entities(ShadeAutoBatteryLow(coordinator, uid) for uid in coordinator.supported_uids)
 
 
 class ShadeAutoBatteryLow(ShadeAutoEntity, BinarySensorEntity):

@@ -1,6 +1,6 @@
 {
   "domain": "shadeauto",
-  "name": "ShadeAuto (local)",
+  "name": "Norman ShadeAuto",
   "categories": [
     "blinds_curtains"
   ],
@@ -15,5 +15,5 @@
     "custom_components.shadeauto"
   ],
   "requirements": [],
-  "version": "0.8.1"
+  "version": "0.8.2"
 }

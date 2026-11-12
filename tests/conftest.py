@@ -32,6 +32,7 @@ from custom_components.shadeauto.const import DOMAIN
 
 FIXTURES = Path(__file__).parent / "fixtures"
 HOST = "192.168.3.190"
+THING_NAME = "us-east-1:00000000-0000-0000-0000-000000000000_0000000000000000"  # as tests/fixtures/registration.json
 BASE = f"http://{HOST}:10123/NM/v1"
 
 # Shade UIDs as they appear in the fixtures, with their state in status.json.
@@ -597,12 +598,16 @@ FAST_OPTIONS: dict[str, Any] = {
 PUSH_OPTIONS: dict[str, Any] = {"push_enabled": True}
 
 
-def make_entry(options: dict[str, Any] | None = None) -> MockConfigEntry:
-    """Build (but do not add) a config entry for the fixture host."""
+def make_entry(options: dict[str, Any] | None = None, *, unique_id: str = f"shadeauto_{THING_NAME}") -> MockConfigEntry:
+    """Build (but do not add) a config entry for the fixture host.
+
+    The unique id is the hub's ThingName, as 0.8.2 writes it; pass the
+    host-based form of earlier versions to test the re-keying.
+    """
     return MockConfigEntry(
         domain=DOMAIN,
         title=f"ShadeAuto ({HOST})",
-        unique_id=f"shadeauto_{HOST}",
+        unique_id=unique_id,
         data={"host": HOST},
         options={**FAST_OPTIONS, **(options or {})},
     )

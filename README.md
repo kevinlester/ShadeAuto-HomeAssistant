@@ -1,4 +1,4 @@
-# ShadeAuto (local) — Home Assistant Custom Integration
+# Norman ShadeAuto — Home Assistant Custom Integration
 
 Control Norman **ShadeAuto** shades locally through the hub's undocumented HTTP API. Shades appear as standard Home Assistant covers with open, close, stop, set position, and tilt where the shade supports it, plus battery sensors and state that follows the shade however it was moved.
 
@@ -7,7 +7,7 @@ Control Norman **ShadeAuto** shades locally through the hub's undocumented HTTP 
 ---
 
 ## Features
-- **Auto-discover shades** from any ShadeAuto hub(s); works with **multiple hubs** (add each hub by IP/hostname).
+- **Finds every shade on the hub** by itself; works with **multiple hubs** (add each hub by IP/hostname; there is no network discovery of hubs).
 - One **Device** per discovered shade, named as in the ShadeAuto app, showing model and motor firmware.
   - One **Cover** entity per shade that supports the following:
     - open / close / stop
@@ -31,31 +31,24 @@ Every shade gets one device with these entities (`<shade>` is the shade's name f
 | `cover.<shade>` | The shade. Supports open, close, stop and set position. | State: `open`, `closed`, `opening`, `closing`. Attribute `current_position`: 0 = fully lowered, 100 = fully raised. |
 | `cover.<shade>_top` | Two-rail shades only: the top rail. The main cover then drives the bottom rail. | Same as above, for the top rail. |
 | `sensor.<shade>_battery` | Battery level (diagnostic). | Percent. |
-| `binary_sensor.<shade>_battery_low` | Low-battery flag (diagnostic). | `on` below the threshold set in Options. |
+| `binary_sensor.<shade>_battery_low` | Low-battery flag (diagnostic). | `on` at or below the threshold set in Options. |
 | `button.<shade>_identify` | Jogs the shade a few small steps down and back up (up and back down if it is fully closed), so you can tell which shade an entity is while setting up. It uses the hub's own fine-tune nudge, the same small step as the vendor app, so the movement is subtle: listen for the motor and watch the bottom edge. The shade ends where it started and its position in Home Assistant does not change. Refused while the shade is moving. | Press. |
 
 PerfectSheer shades add tilt to `cover.<shade>`: open, close, stop and set tilt, with the attribute `current_tilt_position`, 0 = vanes closed, 100 = vanes open. SmartDrapes add the same tilt controls on the hub's own scale: 0 and 100 = vanes closed in opposite directions, 50 = vanes open (see [SmartDrapes](#smartdrapes)).
 
 ## Supported shade types
-The hub reports every shade's type as a `ModuleType`/`ModuleDetail` pair; the device page shows it as the model (for example "PerfectSheer", or "Shade (type 33/3)"). Not all combinations of hardware have been tested. If you have success or failure with unverified hardware below, please let us know.
+The hub reports every shade's type as a `ModuleType`/`ModuleDetail` pair; the device page shows it as the model (for example "PerfectSheer", or "Shade (type 33/3)"). Each pair is handled as one of the shade families below. If a shade of yours does something unexpected, open an issue with its pair and the product name.
 
-| Shade | Type | Handled as | How it was verified |
-|---|---|---|---|
-| PerfectSheer | 48/3 | lift + vane tilt | Five shades on a real hub (`docs/hub-characterization-2026-10-22.log`). Thanks to Modusmundi. |
-| PerfectSheer (second generation) | 49/3 | lift + vane tilt | Not verified. The ShadeAuto app calls it PerfectSheer ([kedube/ha-norman](https://github.com/kedube/ha-norman)'s reading of the app). |
-| Cellular | 32/2 | single-rail | Real shades in kedube/ha-norman. Not tested with this integration. |
-| Cellular | 32/0 | single-rail | The ShadeAuto app only (kedube/ha-norman). |
-| Roller | 48/1 | single-rail | Users' diagnostics in kedube/ha-norman issues #2 and #5. Not tested with this integration. |
-| Roman | 48/1 | single-rail | The maintainer's own shades, on a real hub with this integration. The hub reports the same type for them as for rollers. |
-| Roman; second-generation roller and roman | 48/2; 49/1, 49/2 | single-rail | The ShadeAuto app only (kedube/ha-norman). Unconfirmed: the roman shades above report 48/1, not 48/2, so the app's names may not match the hub's types. |
-| Other products of those families | 32, 48 or 49 with any other detail | single-rail | Not seen anywhere; handled like the rest of the family, without a warning. |
-| Top-down/bottom-up or day/night cellular | 33/3 | two-rail | Real shades in kedube/ha-norman. This port has not been tested on hardware. |
-| Top-down/bottom-up cellular | 33/other, 32/3, 32/4, 32/5 | two-rail | The ShadeAuto app only (kedube/ha-norman). |
-| SmartDrape | 80/any | draw + vane tilt | Three 80/1 drapes (firmware 0.2.3) on a real hub, tested by rtm: tilt, draw, stop and the vanes kept through a draw. The tilt follows [PR #7](https://github.com/kevinlester/ShadeAuto-HomeAssistant/pull/7). |
-| Shutter | 1/any | lift only | The ShadeAuto app only. Shutters have louvres instead of rails, which are not supported; the lift commands probably do nothing. |
-| Anything else | other types, or 32, 48 or 49 reported without a detail | lift only | A warning in the log asks you to report the type. Please open an issue with the pair and what the shade is. |
+| Shade | Type | Handled as |
+|---|---|---|
+| PerfectSheer | 48/3, 49/3 | lift + vane tilt |
+| Cellular, roller and roman | 32/0, 32/2, 48/1, 48/2, 49/1, 49/2, and any other detail of types 32, 48 and 49 | single-rail (lift only) |
+| Top-down/bottom-up or day/night cellular | 33/any, 32/3, 32/4, 32/5 | two-rail (a cover per rail) |
+| SmartDrape | 80/any | draw + vane tilt |
+| Shutter | 1/any | not supported: shutters have louvres instead of rails, so no entities are created for them; a line in the log says so at startup |
+| Anything else | other types, or 32, 48 or 49 reported without a detail | lift only, with a warning in the log asking you to report the pair |
 
-[docs/HUB_PROTOCOL.md](docs/HUB_PROTOCOL.md) (section 3.1) has the details and the evidence for each family.
+[docs/HUB_PROTOCOL.md](docs/HUB_PROTOCOL.md) (section 3.1) has the details for each family.
 
 ## How tilt works on PerfectSheer shades
 Sheer (PerfectSheer) shades can only tilt their vanes while the shade is **fully lowered** — the hub enforces this and closes the vanes whenever the shade is raised. The integration follows the hub:
@@ -75,7 +68,7 @@ The vanes never close on their own when the drape returns to closed: they stay w
 
 Unlike PerfectSheer shades, a drape is never moved before a tilt: tilt commands leave the draw where it is. Every draw restates the vane position the hub last reported, so moving the drape does not close its vanes. Only the draw is tracked for "opening"/"closing" and for verify; after a tilt the integration keeps polling quickly until the hub reports the new vane position (about 12 s on the drapes tested), so `current_tilt_position` follows within seconds.
 
-Tested by rtm on three SmartDrapes (80/1, firmware 0.2.3) with Home Assistant 2026.9; please report how yours behaves, especially where its vanes stop.
+Please report how yours behaves, especially where its vanes stop.
 
 ## Two-rail shades (top-down/bottom-up, day/night)
 These shades have two rails that move independently, and each gets its own cover on the shade's device:
@@ -86,7 +79,7 @@ These shades have two rails that move independently, and each gets its own cover
 - The **collision guard** (on by default) keeps the top rail at or above the bottom rail. If a move would cross them, the other rail moves just far enough out of the way: raising the bottom rail past the top rail raises the top rail with it, and lowering the top rail past the bottom rail lowers the bottom rail with it. **Minimum gap between the rails** adds a margin the guard keeps between them; with a gap of 10 %, for example, the bottom rail goes no higher than 90 % and the top rail no lower than 10 %. With the guard off, the other rail is held where it is and the move is sent as asked.
 - Stop on either cover stops the whole shade (the hub has one stop command per shade).
 
-This follows [PR #9](https://github.com/kevinlester/ShadeAuto-HomeAssistant/pull/9), which was tested on one real shade. This integration has not been run against a two-rail shade yet; please report how yours behaves.
+This follows [PR #9](https://github.com/kevinlester/ShadeAuto-HomeAssistant/pull/9). Please report how yours behaves.
 
 ## How shade updates reach Home Assistant
 This integration has 3 mechanisms for keeping the state of the shades in sync with HA: 
@@ -104,7 +97,7 @@ The hub has a notification stream: a connection it keeps open and on which it se
 - **When the stream is down** (the hub restarted, its Wi-Fi dropped, the connection broke), the integration keeps trying to reopen it, waiting a little longer after each failed attempt, up to a minute. A stream counts as working again only once it has stayed open for a minute, so one the hub closes as soon as it is opened is treated as a failed attempt too. Meanwhile polling is still active: every 30 s while idle, every couple of seconds while a shade moves. The hub does not resend what happened while the stream was down, so the integration reads the full status as soon as the stream is back. Nothing is lost; it just shows up at the next poll instead of at once.
 
 ## Changing the hub address
-If your hub gets a new IP address, open Settings → *Devices & Services* → **ShadeAuto**, click the ⋯ menu next to the hub entry and choose **Reconfigure**. Devices, areas, names, entity ids and automations are kept: the integration identifies the hub by its `ThingName`, not by its address.
+If your hub gets a new IP address, open Settings → *Devices & Services* → **ShadeAuto**, click the ⋯ menu next to the hub entry and choose **Reconfigure**. Devices, areas, names, entity ids and automations are kept: the integration identifies the hub by its `ThingName`, not by its address. For the same reason a hub cannot be added twice under two addresses, and Reconfigure refuses an address where a different hub answers; add that one as a new hub instead.
 
 ## Options
 Settings → *Devices & Services* → **ShadeAuto** → **Configure**. Saving reloads the integration so changes take effect at once.
@@ -113,7 +106,7 @@ Settings → *Devices & Services* → **ShadeAuto** → **Configure**. Saving re
 |---|---|---|
 | **Poll interval while idle** | 30 s | How often `/status` is read while nothing is moving. With push updates on, this is the safety net for anything the notifications miss. |
 | **Poll interval while a shade is moving** | 2 s | Faster polling during a move. The hub only reports a position once a move has finished. With push updates on, its notification usually brings that news first; this poll catches it when the stream is down. |
-| **Use the hub's change notifications (push updates)** | off | Listen to the hub's notification stream and read the hub's status as soon as it announces a change. Off: the stream is never opened and Home Assistant learns about changes by polling alone. Polling runs either way. It does not turn off verify's report-in request (see **Verify the shade arrived and retry once if not**), which then always waits the full 10 s. **Note**: off by default as a precaution. The stream holds a connection to the hub open for as long as the integration runs, and it has only been tested on a few hubs so far. If you turn it on, please report how it behaves, good or bad. |
+| **Use the hub's change notifications (push updates)** | off | Listen to the hub's notification stream and read the hub's status as soon as it announces a change. Off: the stream is never opened and Home Assistant learns about changes by polling alone. Polling runs either way. It does not turn off verify's report-in request (see **Verify the shade arrived and retry once if not**), which then always waits the full 10 s. Off by default: the stream holds a connection to the hub open for as long as the integration runs. If you turn it on, please report how it behaves, good or bad. |
 | **Vane tilt** | Automatic | **Automatic** shows tilt controls and `current_tilt_position` on the shades with vanes, PerfectSheer and SmartDrape; **Off** hides them everywhere. |
 | **SmartDrapes: Min vane value when closed** | 0 | 0 shows a drape's vanes on the hub's own scale. While a drape is open its vanes stop short of 0 and 100; if closing them reads back as 17, enter 17: on an open drape the hub's 17 to 83 is then shown and set as 0 to 100, so closed reads 0 and 100 and open stays 50. A fully closed drape keeps the hub's scale, and closing the drape shuts vanes that were closed as far as it allowed. Up to 49. See [SmartDrapes](#smartdrapes). |
 | **Two-rail shades: keep the top rail at or above the bottom rail** | on | The collision guard described above. Turn it off only if it stops a position your shade can really reach. |
@@ -127,15 +120,12 @@ Settings → *Devices & Services* → **ShadeAuto** → **Configure**. Saving re
 
 ## Installation
 
-### Via HACS (custom repository)
-Click this badge to add this repository to your HACS custom repositories: [![Open this repository in HACS](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=kevinlester&repository=ShadeAuto-HomeAssistant&category=integration)
-
-Or: HACS → *Integrations* → ⋯ → **Custom repositories** → add this GitHub repo URL, Category **Integration**.
-
-Then
-1. Find **ShadeAuto (local)** → **Download** → **Restart** Home Assistant.
-2. Settings → *Devices & Services* → **Add Integration** → **ShadeAuto (local)** → enter your **hub IP**.
+### Via HACS
+1. In HACS (the Marketplace in Home Assistant 2026.11 and newer), search for **Norman ShadeAuto** → **Download** → **Restart** Home Assistant.
+2. Settings → *Devices & Services* → **Add Integration** → **Norman ShadeAuto** → enter your **hub IP**.
 3. Repeat for additional hubs.
+
+If the search does not find it, add this repository by hand: click [![Open this repository in HACS](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=kevinlester&repository=ShadeAuto-HomeAssistant&category=integration), or HACS → ⋯ → **Custom repositories** → add this GitHub repo URL, Category **Integration**, then continue from step 1.
 
 ### Manual
 1. Copy `custom_components/shadeauto/` into your HA `config/custom_components/`.
@@ -232,8 +222,7 @@ actions:
 - **No hub-wide report-ins.** The hub can ask every shade at once to report its position, which might correct positions it lost track of. The integration deliberately never does that: in [kedube/ha-norman](https://github.com/kedube/ha-norman) issue #5 a hub-wide report-in closed a user's roller shades with no move command sent. It only ever asks one shade at a time, and only before re-sending a command to that shade.
 - A shade renamed in the ShadeAuto app keeps its old name in Home Assistant until the integration is reloaded or Home Assistant restarts. The hub announces renames, but this release only re-reads positions when it does.
 - Vanes can be tilted only while the shade is fully lowered (a hub rule, see above).
-- Only PerfectSheer, roman 48/1 and SmartDrape shades have been tested on real hardware. Two-rail and single-rail support follows other projects' findings (see [Supported shade types](#supported-shade-types)); shutter louvres are not supported.
-- `stop_cover_tilt` is exposed, but stopping a shade in the middle of a vane-only move has not been tested separately. It is the same motor and the same stop command as `stop_cover`; what the hub reports for the vanes afterwards is unknown.
+- Shutters get no entities: they have louvres, not rails (see [Supported shade types](#supported-shade-types)).
 - Battery is whatever the hub reports in `BatteryVoltage`, which is a percentage on the hubs seen so far.
 - The API is not official; behavior may change with hub firmware updates.
 
@@ -244,5 +233,6 @@ See [docs/HUB_PROTOCOL.md](docs/HUB_PROTOCOL.md) for the hub's protocol as obser
 Open a GitHub issue. Testing may need your help if the developers do not have the hardware.
 
 ## Credits & License
-- Community discoveries of the local endpoints inspired this integration.
+- The hub's local API was uncovered by the community in the [Norman TDBU blind control](https://community.home-assistant.io/t/norman-tdbu-blind-control/705405) thread: 0x10 read the `/NM/v1/` endpoints and port 10123 out of the hub firmware, and keito wrote an early local integration. The commands here were worked out from there on real hardware.
+- Contributors: Modusmundi (PerfectSheer hub logs), alexfgoldberg (two-rail support, [PR #9](https://github.com/kevinlester/ShadeAuto-HomeAssistant/pull/9)) and rtm (SmartDrape tilt, [PR #7](https://github.com/kevinlester/ShadeAuto-HomeAssistant/pull/7)).
 - MIT License

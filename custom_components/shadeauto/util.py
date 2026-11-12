@@ -56,6 +56,22 @@ class JsonStreamSplitter:
         return values
 
 
+def hub_unique_id(identity: str) -> str:
+    """The config entry unique id of the hub ``identity`` (its ``ThingName``, else its host).
+
+    The ``ThingName`` is the hub's own stable id, so one hub stays one entry
+    across address changes and cannot be added twice under two addresses.
+    Versions up to 0.8.1 used the host; setup re-keys those entries, and the
+    reconfigure flow recognises the old form (:func:`is_host_unique_id`).
+    """
+    return f"shadeauto_{identity}"
+
+
+def is_host_unique_id(unique_id: str | None, host: str | None) -> bool:
+    """Whether ``unique_id`` is the host-based form versions up to 0.8.1 wrote for an entry on ``host``."""
+    return host is not None and unique_id == hub_unique_id(host)
+
+
 def to_int(value: Any) -> int | None:
     """Return ``value`` as an int, or ``None`` when it is missing or not numeric.
 

@@ -48,6 +48,7 @@ from custom_components.shadeauto.const import (
     PROFILE_SHEER,
     PROFILE_SINGLE_RAIL,
     PROFILE_TWO_RAIL,
+    PROFILE_UNSUPPORTED,
     STATUS_REPORT_WAIT_SEC,
     UNTRACKED_SETTLE_SEC,
 )
@@ -170,8 +171,11 @@ def _add_lounge(hub: FakeHub) -> None:
         (80, 1, PROFILE_DRAPE),
         (80, 0, PROFILE_DRAPE),
         (80, None, PROFILE_DRAPE),
-        # Known families without verified behaviour, and pairs nobody has reported.
-        (1, 0, PROFILE_LEGACY),
+        # Shutters have louvres, not rails: nothing here can drive them.
+        (1, 0, PROFILE_UNSUPPORTED),
+        (1, 4, PROFILE_UNSUPPORTED),
+        (1, None, PROFILE_UNSUPPORTED),
+        # Pairs nobody has reported.
         (99, 7, PROFILE_LEGACY),
         (None, None, PROFILE_LEGACY),
         (None, 3, PROFILE_LEGACY),
@@ -225,7 +229,7 @@ async def test_module_pair_missing_from_the_peripheral_list_is_taken_from_status
 
 @pytest.mark.parametrize(
     ("module_type", "module_detail"),
-    [(48, 1), (48, 2), (49, 1), (32, 0), (32, 2), (1, 0), (99, 7)],
+    [(48, 1), (48, 2), (49, 1), (32, 0), (32, 2), (99, 7)],
 )
 async def test_single_rail_and_legacy_shades_are_lift_only_with_bottom_only_commands(
     hass: HomeAssistant, hub: FakeHub, module_type: int, module_detail: int
@@ -252,7 +256,7 @@ async def test_single_rail_and_legacy_shades_are_lift_only_with_bottom_only_comm
 
 @pytest.mark.parametrize(
     ("module_type", "module_detail"),
-    [(48, 1), (1, 0), (99, 7)],  # a roller, a shutter and an unknown pair: single_rail and legacy alike
+    [(48, 1), (99, 7)],  # a roller and an unknown pair: single_rail and legacy alike
 )
 async def test_a_stuck_middle_target_neither_keeps_a_single_rail_shade_moving_nor_triggers_a_retry(
     hass: HomeAssistant, hub: FakeHub, freezer: FrozenDateTimeFactory, module_type: int, module_detail: int
@@ -305,10 +309,9 @@ async def test_single_rail_retry_is_bottom_only_too(
 async def test_unrecognised_module_pair_is_warned_about_once(
     hass: HomeAssistant, hub: FakeHub, freezer: FrozenDateTimeFactory, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """One warning per unknown pair, naming its shades; known-but-unsupported families only log at debug."""
+    """One warning per unknown pair, naming its shades."""
     hub.add_shade(60001, "Mystery One", 99, 7)
     hub.add_shade(60002, "Mystery Two", 99, 7)
-    hub.add_shade(60004, "Louvres", 1, 0)
     caplog.set_level(logging.DEBUG, logger="custom_components.shadeauto")
     entry = await _setup(hass)
     await _poll(hass, freezer, DEFAULT_POLL + 1)
@@ -320,12 +323,41 @@ async def test_unrecognised_module_pair_is_warned_about_once(
     assert "ModuleType 99 / ModuleDetail 7" in message
     assert "Mystery One" in message
     assert "Mystery Two" in message
-    debug = "\n".join(r.getMessage() for r in caplog.records if r.levelno == logging.DEBUG)
-    assert "Louvres (Shutter, ModuleType 1 / ModuleDetail 0)" in debug
 
     coordinator = _coordinator(entry)
-    for uid in (60001, 60002, 60004):
+    for uid in (60001, 60002):
         assert coordinator.peripherals[str(uid)].profile == PROFILE_LEGACY
+
+
+async def test_a_shutter_gets_no_entities_and_no_device(
+    hass: HomeAssistant, hub: FakeHub, freezer: FrozenDateTimeFactory, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A family the integration cannot drive is listed by the hub, logged once at info, and otherwise left alone."""
+    hub.add_shade(60004, "Louvres", 1, 0)
+    caplog.set_level(logging.DEBUG, logger="custom_components.shadeauto")
+    entry = await _setup(hass)
+    await _poll(hass, freezer, DEFAULT_POLL + 1)
+
+    coordinator = _coordinator(entry)
+    assert coordinator.peripherals["60004"].profile == PROFILE_UNSUPPORTED
+    assert "60004" not in coordinator.supported_uids
+    assert set(coordinator.supported_uids) == {str(uid) for uid in ALL_UIDS}
+    assert coordinator.axes_for("60004") == ()
+    assert not coordinator.is_shade_moving("60004")
+
+    registry = er.async_get(hass)
+    assert len(er.async_entries_for_config_entry(registry, entry.entry_id)) == ENTITIES_PER_SHADE * len(ALL_UIDS)
+    assert not [e for e in er.async_entries_for_config_entry(registry, entry.entry_id) if "60004" in e.unique_id]
+    devices = dr.async_entries_for_config_entry(dr.async_get(hass), entry.entry_id)
+    assert len(devices) == 1 + len(ALL_UIDS)  # the hub and the five sheers
+    assert not [d for d in devices if d.name == "Louvres"]
+
+    infos = [r for r in caplog.records if r.levelno == logging.INFO and r.name.startswith("custom_components")]
+    assert [r.getMessage() for r in infos] == [
+        "Louvres is a Shutter (ModuleType 1 / ModuleDetail 0), which this integration cannot drive; "
+        "no entities are created for it"
+    ]
+    assert not [r for r in caplog.records if r.levelno == logging.WARNING and r.name.startswith("custom_components")]
 
 
 # --- two rails --------------------------------------------------------------------

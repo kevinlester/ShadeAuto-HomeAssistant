@@ -13,6 +13,7 @@ from homeassistant.helpers import device_registry as dr, entity_registry as er
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.shadeauto.const import DOMAIN
+from custom_components.shadeauto.util import hub_unique_id
 
 from .conftest import ALL_UIDS, COVER, FAST_OPTIONS, HOST, KITCHEN, FakeHub, make_entry, setup_integration
 
@@ -20,7 +21,7 @@ NEW_HOST = "192.168.3.250"
 
 
 async def test_user_flow_creates_entry(hass: HomeAssistant, hub: FakeHub) -> None:
-    """A reachable hub produces an entry keyed by host."""
+    """A reachable hub produces an entry keyed on the hub's ThingName, not its address."""
     result = await hass.config_entries.flow.async_init(DOMAIN, context={"source": SOURCE_USER})
     assert result["type"] is FlowResultType.FORM
     assert result["errors"] == {}
@@ -32,7 +33,7 @@ async def test_user_flow_creates_entry(hass: HomeAssistant, hub: FakeHub) -> Non
     assert result["type"] is FlowResultType.CREATE_ENTRY
     assert result["title"] == f"ShadeAuto ({HOST})"
     assert result["data"] == {"host": HOST}  # whitespace is stripped
-    assert result["result"].unique_id == f"shadeauto_{HOST}"
+    assert result["result"].unique_id == hub_unique_id(hub.thing_name)
     assert setup.call_count == 1
     # The flow validated connectivity with the registration endpoint only.
     assert [path for path, _ in hub.requests] == ["registration"]
@@ -51,12 +52,39 @@ async def test_user_flow_reports_unreachable_hub(hass: HomeAssistant, hub: FakeH
 async def test_user_flow_aborts_for_configured_host(
     hass: HomeAssistant, hub: FakeHub, config_entry: MockConfigEntry
 ) -> None:
-    """The same host cannot be added twice."""
+    """The same host cannot be added twice; the hub is not even asked (the entry may still carry a host-based id)."""
     result = await hass.config_entries.flow.async_init(DOMAIN, context={"source": SOURCE_USER})
     result = await hass.config_entries.flow.async_configure(result["flow_id"], {"host": HOST})
 
     assert result["type"] is FlowResultType.ABORT
     assert result["reason"] == "already_configured"
+    assert hub.requests == []
+
+
+async def test_user_flow_aborts_for_configured_hub_at_another_address(
+    hass: HomeAssistant, hub: FakeHub, integration: MockConfigEntry
+) -> None:
+    """The same hub cannot be added twice under two addresses: its ThingName is the unique id."""
+    hub.add_host(NEW_HOST)
+    assert integration.unique_id == hub_unique_id(hub.thing_name)
+
+    result = await hass.config_entries.flow.async_init(DOMAIN, context={"source": SOURCE_USER})
+    result = await hass.config_entries.flow.async_configure(result["flow_id"], {"host": NEW_HOST})
+
+    assert result["type"] is FlowResultType.ABORT
+    assert result["reason"] == "already_configured"
+    assert integration.data == {"host": HOST}
+
+
+async def test_user_flow_falls_back_to_host_when_hub_reports_no_thing_name(hass: HomeAssistant, hub: FakeHub) -> None:
+    del hub.registration["ThingName"]
+    result = await hass.config_entries.flow.async_init(DOMAIN, context={"source": SOURCE_USER})
+    with patch("custom_components.shadeauto.async_setup_entry", return_value=True):
+        result = await hass.config_entries.flow.async_configure(result["flow_id"], {"host": HOST})
+        await hass.async_block_till_done()
+
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    assert result["result"].unique_id == hub_unique_id(HOST)
 
 
 async def test_reconfigure_moves_entry_to_new_host(
@@ -82,7 +110,7 @@ async def test_reconfigure_moves_entry_to_new_host(
     assert result["type"] is FlowResultType.ABORT
     assert result["reason"] == "reconfigure_successful"
     assert integration.data == {"host": NEW_HOST}
-    assert integration.unique_id == f"shadeauto_{NEW_HOST}"
+    assert integration.unique_id == hub_unique_id(hub.thing_name)  # the same hub, so unchanged
     assert integration.title == f"ShadeAuto ({NEW_HOST})"
     assert integration.runtime_data.api.host == NEW_HOST
 
@@ -108,8 +136,63 @@ async def test_reconfigure_rejects_unreachable_host(
 async def test_reconfigure_aborts_when_host_belongs_to_another_entry(
     hass: HomeAssistant, hub: FakeHub, integration: MockConfigEntry
 ) -> None:
-    other = MockConfigEntry(domain=DOMAIN, unique_id=f"shadeauto_{NEW_HOST}", data={"host": NEW_HOST})
+    other = MockConfigEntry(domain=DOMAIN, unique_id=hub_unique_id(NEW_HOST), data={"host": NEW_HOST})
     other.add_to_hass(hass)
+
+    result = await integration.start_reconfigure_flow(hass)
+    result = await hass.config_entries.flow.async_configure(result["flow_id"], {"host": NEW_HOST})
+
+    assert result["type"] is FlowResultType.ABORT
+    assert result["reason"] == "already_configured"
+    assert integration.data == {"host": HOST}
+
+
+async def test_reconfigure_refuses_an_address_where_a_different_hub_answers(
+    hass: HomeAssistant, hub: FakeHub, integration: MockConfigEntry
+) -> None:
+    """An entry stays with its hub: the hub at the new address must report the same ThingName."""
+    hub.add_host(NEW_HOST)
+    hub.registration["ThingName"] = "some-other-hub"
+
+    result = await integration.start_reconfigure_flow(hass)
+    result = await hass.config_entries.flow.async_configure(result["flow_id"], {"host": NEW_HOST})
+
+    assert result["type"] is FlowResultType.ABORT
+    assert result["reason"] == "wrong_hub"
+    assert integration.data == {"host": HOST}
+    assert integration.unique_id == hub_unique_id(hub.thing_name)
+
+
+async def test_reconfigure_rekeys_an_entry_that_still_has_a_host_unique_id(hass: HomeAssistant, hub: FakeHub) -> None:
+    """An entry from 0.8.1 whose hub moved before the upgrade never loaded, so it has no ThingName to compare.
+
+    That is the main reason to reconfigure at all, so the host-based id is
+    taken as "not yet re-keyed" and replaced, not refused as a different hub.
+    """
+    hub.add_host(NEW_HOST)
+    entry = make_entry(unique_id=hub_unique_id(HOST))  # as 0.8.1 wrote it
+    entry.add_to_hass(hass)
+    assert entry.unique_id == hub_unique_id(HOST)
+
+    result = await entry.start_reconfigure_flow(hass)
+    result = await hass.config_entries.flow.async_configure(result["flow_id"], {"host": NEW_HOST})
+    await hass.async_block_till_done()
+
+    assert result["type"] is FlowResultType.ABORT
+    assert result["reason"] == "reconfigure_successful"
+    assert entry.data == {"host": NEW_HOST}
+    assert entry.unique_id == hub_unique_id(hub.thing_name)
+
+
+async def test_reconfigure_aborts_when_the_hub_at_the_new_address_is_another_entry(
+    hass: HomeAssistant, hub: FakeHub, integration: MockConfigEntry
+) -> None:
+    """Two entries would otherwise end up with the same unique id."""
+    hub.add_host(NEW_HOST)
+    other = MockConfigEntry(domain=DOMAIN, unique_id=hub_unique_id(hub.thing_name), data={"host": "10.0.0.9"})
+    other.add_to_hass(hass)
+    # This entry has not been re-keyed (two entries for one hub, from the host-based days).
+    hass.config_entries.async_update_entry(integration, unique_id=hub_unique_id(HOST))
 
     result = await integration.start_reconfigure_flow(hass)
     result = await hass.config_entries.flow.async_configure(result["flow_id"], {"host": NEW_HOST})
@@ -222,7 +305,7 @@ async def test_options_form_offers_push_updates_off_for_an_entry_saved_before_th
 ) -> None:
     """Push updates are opt-in: an older entry stays on polling until the option is turned on."""
     options = {key: value for key, value in {**FAST_OPTIONS, **IN_RANGE_SPACING}.items() if key != "push_enabled"}
-    entry = MockConfigEntry(domain=DOMAIN, unique_id=f"shadeauto_{HOST}", data={"host": HOST}, options=options)
+    entry = MockConfigEntry(domain=DOMAIN, unique_id=hub_unique_id(HOST), data={"host": HOST}, options=options)
     entry.add_to_hass(hass)
     await setup_integration(hass, entry)
     assert entry.runtime_data.listener is None

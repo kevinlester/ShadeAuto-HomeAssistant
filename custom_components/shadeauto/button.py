@@ -24,7 +24,7 @@ async def async_setup_entry(
     hass: HomeAssistant, entry: ShadeAutoConfigEntry, async_add_entities: AddConfigEntryEntitiesCallback
 ) -> None:
     coordinator = entry.runtime_data.coordinator
-    async_add_entities(ShadeAutoIdentify(coordinator, uid) for uid in coordinator.peripherals)
+    async_add_entities(ShadeAutoIdentify(coordinator, uid) for uid in coordinator.supported_uids)
 
 
 def identify_goes_up_first(position: int | None) -> bool:

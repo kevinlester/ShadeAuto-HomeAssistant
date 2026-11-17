@@ -120,12 +120,13 @@ Settings → *Devices & Services* → **ShadeAuto** → **Configure**. Saving re
 
 ## Installation
 
-### Via HACS
-1. In HACS (the Marketplace in Home Assistant 2026.11 and newer), search for **Norman ShadeAuto** → **Download** → **Restart** Home Assistant.
-2. Settings → *Devices & Services* → **Add Integration** → **Norman ShadeAuto** → enter your **hub IP**.
-3. Repeat for additional hubs.
+### Via HACS (custom repository)
+This integration is installed as a HACS custom repository; it is not in the default catalog.
 
-If the search does not find it, add this repository by hand: click [![Open this repository in HACS](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=kevinlester&repository=ShadeAuto-HomeAssistant&category=integration), or HACS → ⋯ → **Custom repositories** → add this GitHub repo URL, Category **Integration**, then continue from step 1.
+1. Click [![Open this repository in HACS](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=kevinlester&repository=ShadeAuto-HomeAssistant&category=integration), which opens this repository in your HACS. Or add it by hand: HACS (the Marketplace in Home Assistant 2026.11 and newer) → ⋯ → **Custom repositories** → paste this repository's URL, Category **Integration**.
+2. **Download** → **Restart** Home Assistant.
+3. Settings → *Devices & Services* → **Add Integration** → **Norman ShadeAuto** → enter your **hub IP**.
+4. Repeat step 3 for additional hubs.
 
 ### Manual
 1. Copy `custom_components/shadeauto/` into your HA `config/custom_components/`.

@@ -6,4 +6,4 @@
 #   uv venv --python 3.13 .venv-min
 #   uv pip install --python .venv-min/bin/python --exclude-newer 2025-08-24T00:00:00Z -r requirements_test_min.txt
 # Raise this together with hacs.json; see CONTRIBUTING.md.
-pytest-homeassistant-custom-component==0.13.272
+pytest-homeassistant-custom-component==0.13.375
